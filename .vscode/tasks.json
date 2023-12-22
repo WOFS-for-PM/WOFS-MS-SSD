@@ -1,0 +1,21 @@
+{
+    "tasks": [
+        {
+            "type": "cppbuild",
+            "label": "KILLER-DEBUG Compile",
+            "command": "make",
+            "args": [
+                "DEBUG=1"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "group": "build",
+            "detail": "Compiler generation task"
+        }
+    ],
+    "version": "2.0.0"
+}
