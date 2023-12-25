@@ -187,9 +187,9 @@ static inline s64 atomic64_read(const atomic64_t *v) {
 #define atomic64_add_return_relaxed atomic64_add_return
 
 typedef pthread_spinlock_t spinlock_t;
-#define spinlock_init pthread_spin_init;
-#define spin_lock pthread_spin_lock;
-#define spin_unlock pthread_spin_unlock;
+#define spin_lock_init(lock) pthread_spin_init(lock, PTHREAD_PROCESS_PRIVATE);
+#define spin_lock(lock) pthread_spin_lock(lock);
+#define spin_unlock(lock) pthread_spin_unlock(lock);
 
 struct super_block {
     void *s_fs_info;

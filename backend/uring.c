@@ -1,8 +1,6 @@
 #define _GNU_SOURCE
 #include <stdlib.h>
-#include <unistd.h>
 #include <sys/syscall.h>
-#include <linux/unistd.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <linux/io_uring.h>
@@ -115,6 +113,7 @@ static int __ioring_structure_unmap(struct ioring_data *ld) {
     for (i = 0; i < ARRAY_SIZE(ld->mmap); i++)
         munmap(ld->mmap[i].ptr, ld->mmap[i].len);
     close(ld->ring_fd);
+    return 0;
 }
 
 static int __ioring_queue_init(struct ioring_data *ld, int sqpoll_cpu) {

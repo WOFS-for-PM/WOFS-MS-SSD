@@ -10,7 +10,7 @@ OPTS := -O3
 BUILD_DIR := $(shell pwd)/build
 LIB_DIR := $(shell pwd)
 
-LIB_FILES := $(shell find $(LIB_DIR) -name "*.c" -maxdepth 1)
+LIB_FILES := $(shell find $(LIB_DIR) -maxdepth 1 -name "*.c" )
 LIB_FILES += $(shell find $(LIB_DIR)/backend -name "*.c")
 
 LIB_OBJS := $(patsubst $(LIB_DIR)/%.c,$(BUILD_DIR)/%.o,$(LIB_FILES))
@@ -52,8 +52,14 @@ ci-test: libkiller.so
 	@echo "\033[32m\033[1m===== Done =====\n\033[0m"
 
 	@echo "\033[35m\033[1m===== FIO Tests =====\033[0m"
-	sudo bash scripts/run_killer.sh fio -filename=\\a -fallocate=none -direct=0 -iodepth 1 -rw=write -ioengine=sync -bs=4K -size=128k -name=write
+	sudo bash scripts/run_killer.sh fio -filename=\a -fallocate=none -direct=0 -iodepth 1 -rw=write -ioengine=sync -bs=4K -size=128k -name=write
 	@echo "\033[32m\033[1m===== Done =====\n\033[0m"
+
+fio-strace:
+	mkdir -p trace
+	sudo rm -f ./trace/output-golden ./trace/output-killer ./trace/test-golden ./trace/test-killer
+	sudo bash scripts/run_naive_trace.sh fio -filename=./trace/test-golden -fallocate=none -direct=0 -iodepth 1 -rw=write -ioengine=sync -bs=4K -size=128k -name=write -thread
+	sudo bash scripts/run_killer_trace.sh fio -filename=./trace/test-killer -fallocate=none -direct=0 -iodepth 1 -rw=write -ioengine=sync -bs=4K -size=128k -name=write -thread
 
 gdb:
 	sudo gdb -x scripts/.gdbinit tests/test

@@ -22,7 +22,6 @@
 #include <sys/types.h>
 #include <sys/vfs.h>
 #include <time.h>
-#include <unistd.h>
 #include <x86intrin.h>
 
 #define EPERM 1    /* Operation not permitted */

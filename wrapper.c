@@ -9,7 +9,7 @@
 #define WRAPPER_DEBUG
 
 #ifdef WRAPPER_DEBUG
-#define PRINT_FUNC printf("\tcalled KILLER func: %s\n", __func__)
+#define PRINT_FUNC pr_info("\tcalled KILLER func: %s\n", __func__)
 #else
 #define PRINT_FUNC ;
 #endif
@@ -53,6 +53,7 @@
 #define ALIAS_FDATASYNC fdatasync
 #define ALIAS_FCNTL fcntl
 #define ALIAS_FCNTL2 __fcntl64_nocancel_adjusted
+#define ALIAS_FADVISE posix_fadvise64
 #define ALIAS_OPENDIR opendir
 #define ALIAS_READDIR readdir
 #define ALIAS_READDIR64 readdir64
@@ -107,6 +108,9 @@
 #define ALIAS_FSTAT64 fstat64
 #define ALIAS_LSTAT lstat
 #define ALIAS_LSTAT64 lstat64
+#define ALIAS_XSTAT __xstat
+#define ALIAS_XSTAT64 __xstat64
+
 /* Now all the metadata operations */
 #define ALIAS_MKDIR mkdir
 #define ALIAS_RENAME rename
@@ -147,6 +151,7 @@
 #define RETT_FDATASYNC int
 #define RETT_FCNTL int
 #define RETT_FCNTL2 int
+#define RETT_FADVISE int
 #define RETT_OPENDIR DIR *
 #define RETT_READDIR struct dirent *
 #define RETT_READDIR64 struct dirent64 *
@@ -204,6 +209,8 @@
 #define RETT_FSTAT64 int
 #define RETT_LSTAT int
 #define RETT_LSTAT64 int
+#define RETT_XSTAT int
+#define RETT_XSTAT64 int
 /* Now all the metadata operations */
 #define RETT_MKDIR int
 #define RETT_RENAME int
@@ -252,6 +259,7 @@
 #define INTF_FDATASYNC int fd
 #define INTF_FCNTL int fd, int cmd, ...
 #define INTF_FCNTL2 int fd, int cmd, void *arg
+#define INTF_FADVISE int fd, off_t offset, off_t len, int advice
 #define INTF_OPENDIR const char *path
 #define INTF_READDIR DIR *dirp
 #define INTF_READDIR64 DIR *dirp
@@ -308,6 +316,8 @@
 #define INTF_FSTAT64 int file, struct stat64 *buf
 #define INTF_LSTAT const char *path, struct stat *buf
 #define INTF_LSTAT64 const char *path, struct stat64 *buf
+#define INTF_XSTAT int ver, const char *path, struct stat *buf
+#define INTF_XSTAT64 int ver, const char *path, struct stat64 *buf
 /* Now all the metadata operations */
 #define INTF_MKDIR const char *path, uint32_t mode
 #define INTF_RENAME const char *old, const char *new
@@ -320,32 +330,56 @@
 #define INTF_SYMLINKAT const char *old_path, int newdirfd, const char *new_path
 #define INTF_MKDIRAT int dirfd, const char *path, mode_t mode
 
-#define KLLER_ALL_OPS \
-    (OPEN)(           \
-        LIBC_OPEN64)(OPENAT)(CREAT)(CLOSE)(ACCESS)(SEEK)(TRUNC)(FTRUNC)(LINK)(UNLINK)(FSYNC)(READ)(READ2)(WRITE)(PREAD)(PREAD64)(PWRITE)(PWRITE64)(STAT)(STAT64)(FSTAT)(FSTAT64)(LSTAT)(RENAME)(MKDIR)(RMDIR)(FSTATFS)(FDATASYNC)(FCNTL)(FCNTL2)(OPENDIR)(CLOSEDIR)(READDIR)(READDIR64)(ERROR)(SYNC_FILE_RANGE)(FOPEN)(FPUTS)(FGETS)(FWRITE)(FREAD)(FCLOSE)(FSEEK)(FFLUSH)
+#define KILLER_ALL_OPS \
+    (OPEN)(            \
+        OPEN64)(OPENAT)(CREAT)(CLOSE)(ACCESS)(SEEK)(TRUNC)(FTRUNC)(LINK)(UNLINK)(FSYNC)(READ)(WRITE)(PREAD)(PREAD64)(PWRITE)(PWRITE64)(XSTAT)(XSTAT64)(RENAME)(MKDIR)(RMDIR)(FSTATFS)(FDATASYNC)(FCNTL)(FADVISE)(OPENDIR)(CLOSEDIR)(READDIR)(READDIR64)(ERROR)(SYNC_FILE_RANGE)(FOPEN)(FPUTS)(FGETS)(FWRITE)(FREAD)(FCLOSE)(FSEEK)(FFLUSH)
 
 #define PREFIX(call) (real_##call)
 
+// Real syscall type
 #define TYPE_REL_SYSCALL(op) typedef RETT_##op (*real_##op##_t)(INTF_##op);
 #define TYPE_REL_SYSCALL_WRAP(r, data, elem) TYPE_REL_SYSCALL(elem)
 
-BOOST_PP_SEQ_FOR_EACH(TYPE_REL_SYSCALL_WRAP, placeholder, KLLER_ALL_OPS)
+BOOST_PP_SEQ_FOR_EACH(TYPE_REL_SYSCALL_WRAP, placeholder, KILLER_ALL_OPS)
 
 static struct real_ops {
 #define DEC_REL_SYSCALL(op) real_##op##_t op;
 #define DEC_REL_SYSCALL_WRAP(r, data, elem) DEC_REL_SYSCALL(elem)
-    BOOST_PP_SEQ_FOR_EACH(DEC_REL_SYSCALL_WRAP, placeholder, KLLER_ALL_OPS)
+    BOOST_PP_SEQ_FOR_EACH(DEC_REL_SYSCALL_WRAP, placeholder, KILLER_ALL_OPS)
 } real_ops;
 
 void insert_real_op() {
 #define FILL_REL_SYSCALL(op) \
     real_ops.op = dlsym(RTLD_NEXT, MK_STR3(ALIAS_##op));
 #define FILL_REL_SYSCALL_WRAP(r, data, elem) FILL_REL_SYSCALL(elem)
-    BOOST_PP_SEQ_FOR_EACH(FILL_REL_SYSCALL_WRAP, placeholder, KLLER_ALL_OPS)
+    BOOST_PP_SEQ_FOR_EACH(FILL_REL_SYSCALL_WRAP, placeholder, KILLER_ALL_OPS)
 }
+
+// NOTE: It is hard to determine which program will
+//       use what constructor priority (both called
+//       before main), it is a must to check the real
+//       ops for every function
+// NOTE: Good news is that the performance is measured
+//       after main(), so insert_real_op will not happen
+#define OP_DEFINE_SAFE(op, FUNC)          \
+    RETT_##op ALIAS_##op(INTF_##op) {     \
+        if (unlikely(real_ops.op == 0)) { \
+            insert_real_op();             \
+        }                                 \
+        FUNC                              \
+    }
+
 #define OP_DEFINE(op) RETT_##op ALIAS_##op(INTF_##op)
 
-OP_DEFINE(OPEN) {
+int smp_processor_id(void) {
+    return sched_getcpu();
+}
+
+int num_online_cpus(void) {
+    return sysconf(_SC_NPROCESSORS_ONLN);
+}
+
+OP_DEFINE_SAFE(OPEN, {
     PRINT_FUNC;
     if (*path == '\\' || *path != '/' || path[1] == '\\') {
         int ret;
@@ -354,11 +388,10 @@ OP_DEFINE(OPEN) {
             mode_t mode;
             va_start(ap, oflag);
             mode = va_arg(ap, mode_t);
-            PRINT_FUNC;
 #ifdef WRAPPER_DEBUG
-            printf("\t\tpath: %s\n", path);
+            pr_info("\t\tpath: %s\n", path);
 #endif
-            char *p = (char *) path;
+            char *p = (char *)path;
             while (*p == '\\') {
                 p++;
             }
@@ -372,9 +405,8 @@ OP_DEFINE(OPEN) {
             }
         } else {
 #ifdef WRAPPER_DEBUG
-            printf("\t\tpath: %s\n", path);
+            pr_info("\t\tpath: %s\n", path);
 #endif
-            PRINT_FUNC;
             ret = hk_open((*path == '\\') ? path + 1 : path, oflag);
             if (ret == -1 && *path != '\\') {
                 return real_ops.OPEN(path, oflag);
@@ -384,7 +416,7 @@ OP_DEFINE(OPEN) {
             return ret;
         }
 #ifdef WRAPPER_DEBUG
-        printf("open returned: %d\n", ret + HK_FD_OFFSET);
+        pr_info("open returned: %d\n", ret + HK_FD_OFFSET);
 #endif
         return ret + HK_FD_OFFSET;
     } else {
@@ -399,15 +431,116 @@ OP_DEFINE(OPEN) {
         }
     }
     return 0;
-}
+})
 
-int smp_processor_id(void) {
-    return sched_getcpu();
-}
+// NOTE: this is important for FIO
+OP_DEFINE_SAFE(OPEN64, {
+    PRINT_FUNC;
+    if (oflag & O_CREAT) {
+        va_list ap;
+        mode_t mode;
+        va_start(ap, oflag);
+        mode = va_arg(ap, mode_t);
+        return open(path, oflag, mode);
+    } else {
+        return open(path, oflag);
+    }
+})
 
-int num_online_cpus(void) {
-    return sysconf(_SC_NPROCESSORS_ONLN);
-}
+OP_DEFINE_SAFE(OPENAT, {
+    PRINT_FUNC;
+    if (*path == '\\' || *path != '/') {
+        int ret;
+        if (oflag & O_CREAT) {
+            va_list ap;
+            mode_t mode;
+            va_start(ap, oflag);
+            mode = va_arg(ap, mode_t);
+            PRINT_FUNC;
+            ret = hk_openat(dirfd - HK_FD_OFFSET,
+                            (*path == '\\') ? path + 1 : path, oflag, mode);
+            if (ret == -1 && *path != '\\') {
+                return real_ops.OPENAT(dirfd, path, oflag, mode);
+            }
+        } else {
+            PRINT_FUNC;
+            ret = hk_openat(dirfd - HK_FD_OFFSET,
+                            (*path == '\\') ? path + 1 : path, oflag);
+            if (ret == -1 && *path != '\\') {
+                return real_ops.OPENAT(dirfd, path, oflag);
+            }
+        }
+        if (ret == -1) {
+            return ret;
+        }
+        return ret + HK_FD_OFFSET;
+    } else {
+        if (oflag & O_CREAT) {
+            va_list ap;
+            mode_t mode;
+            va_start(ap, oflag);
+            mode = va_arg(ap, mode_t);
+            return real_ops.OPENAT(dirfd, path, oflag, mode);
+        } else {
+            return real_ops.OPENAT(dirfd, path, oflag);
+        }
+    }
+})
+
+OP_DEFINE_SAFE(WRITE, {
+    if (file >= HK_FD_OFFSET) {
+        PRINT_FUNC;
+        return hk_write(file - HK_FD_OFFSET, buf, length);
+    } else {
+        return real_ops.WRITE(file, buf, length);
+    }
+})
+
+OP_DEFINE_SAFE(FADVISE, {
+    PRINT_FUNC;
+    if (fd >= HK_FD_OFFSET) {
+        return 0;
+    } else {
+        return real_ops.FADVISE(fd, offset, len, advice);
+    }
+})
+
+OP_DEFINE_SAFE(XSTAT, {
+    PRINT_FUNC;
+    if (ver >= HK_FD_OFFSET) {
+        return 0;
+    } else {
+        return real_ops.XSTAT(ver, path, buf);
+    }
+})
+
+OP_DEFINE_SAFE(XSTAT64, {
+    PRINT_FUNC;
+    if (ver >= HK_FD_OFFSET) {
+        return 0;
+    } else {
+        return real_ops.XSTAT64(ver, path, buf);
+    }
+})
+
+OP_DEFINE_SAFE(CLOSE, {
+    PRINT_FUNC;
+    if (file >= HK_FD_OFFSET) {
+        return hk_close(file - HK_FD_OFFSET);
+    } else {
+        pr_info("real_ops.CLOSE(%d)\n", file);
+        return real_ops.CLOSE(file);
+    }
+})
+
+OP_DEFINE_SAFE(FCLOSE, {
+    PRINT_FUNC;
+    if (fileno(fp) >= HK_FD_OFFSET) {
+        return 0;
+    } else {
+        return real_ops.FCLOSE(fp);
+    }
+})
 
 static struct super_block sb = {.s_fs_info = NULL};
 
@@ -416,26 +549,28 @@ extern void hk_put_super(struct super_block *sb);
 extern int hk_show_stats(void);
 
 static int inited = 0;
-static __attribute__((constructor)) void killer_init(void) {
+static __attribute__((constructor(101))) void killer_init(void) {
     if (real_ops.ERROR == 0) {
         insert_real_op();
         inited = 1;
     }
 
-    printf("Starting to initialize KILLER. \nInstalling real syscalls...\n");
-    printf("Real syscall installed. Initializing KILLER...\n");
+    pr_info("Starting to initialize KILLER.\n");
+    pr_info("Installing real syscalls...\n");
+    pr_info("Real syscall installed. Initializing KILLER...\n");
 
     if (real_ops.ERROR != 0) {
         hk_fill_super(&sb, NULL, 0);
-        printf("KILLER initialized in CPU %d. \nNow the program begins.\n",
-               smp_processor_id());
+        pr_info("KILLER initialized in CPU %d.\n", smp_processor_id());
+        pr_info("Now the program begins.\n");
         return;
     }
-    printf("Failed to init\n");
+    pr_info("Failed to init\n");
 }
 
 static __attribute__((destructor)) void killer_destroy(void) {
-    hk_show_stats();
+    if (measure_timing)
+        hk_show_stats();
     hk_put_super(&sb);
-    printf("KILLER unloaded.\n");
+    pr_info("KILLER unloaded.\n");
 }

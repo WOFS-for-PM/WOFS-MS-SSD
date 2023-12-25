@@ -23,7 +23,7 @@ extern int num_online_cpus(void);
 
 #ifndef __KERNEL__
 // color: info: none, warn: yellow, error: red
-#define pr_info(s, args...) printf(s, ##args)
+#define pr_info(s, args...) printf("INFO (%d): "s, getpid(), ##args)
 #define pr_warn(s, args...) printf("\033[0;33m" s "\033[0m", ##args)
 #define pr_error(s, args...) printf("\033[0;31m" s "\033[0m", ##args)
 #endif
@@ -33,21 +33,26 @@ extern int num_online_cpus(void);
 #define hk_dbg1(s, args...)
 #define hk_warn(s, args...) pr_warn(s, ##args)
 #define hk_info(s, args...) pr_info("cpu-%d: "s, smp_processor_id(), ##args)
-#define hk_err(s, args...)  do { pr_error("cpu-%d: "s, smp_processor_id(), ##args); BUG_ON(1); } while(0);
+#define hk_err(s, args...)                                 \
+    do {                                                   \
+        pr_error("cpu-%d: "s, smp_processor_id(), ##args); \
+        BUG_ON(1);                                         \
+    } while (0);
 
-#define clear_opt(o, opt)	       (o &= ~KILLER_MOUNT_ ## opt)
-#define set_opt(o, opt)		       (o |= KILLER_MOUNT_ ## opt)
-#define test_opt(sb, opt)	       (HK_SB(sb)->s_mount_opt & KILLER_MOUNT_ ## opt)
+#define clear_opt(o, opt) (o &= ~KILLER_MOUNT_##opt)
+#define set_opt(o, opt) (o |= KILLER_MOUNT_##opt)
+#define test_opt(sb, opt) (HK_SB(sb)->s_mount_opt & KILLER_MOUNT_##opt)
 
 /* ======================= ANCHOR: Global values ========================= */
 extern int measure_timing;
 extern int wprotect;
 
+#include "rng_lock.h"
 #include "stats.h"
 #include "super.h"
 #include "linix.h"
 #include "inode.h"
-
+#include "objm.h"
 
 #define KILLER_O_ATOMIC 010
 

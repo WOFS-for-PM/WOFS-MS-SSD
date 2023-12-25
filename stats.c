@@ -1,51 +1,108 @@
 #include "killer.h"
 
+// clang-format off
 const char *Timingstring[TIMING_NUM] = {
     /* Init */
-    "================ Initialization ================", "init", "mount",
-    "new_init", "recovery",
+    "================ Initialization ================", 
+    "init", 
+    "mount",
+    "new_init", 
+    "recovery",
 
     /* Namei operations */
-    "============= Directory operations =============", "create", "lookup",
-    "link", "unlink", "symlink", "mkdir", "rmdir", "mknod", "rename", "readdir",
-    "setattr", "setsize",
+    "============= Directory operations =============", 
+    "create", 
+    "lookup",
+    "link", 
+    "unlink", 
+    "symlink", 
+    "mkdir", 
+    "rmdir", 
+    "mknod", 
+    "rename", 
+    "readdir",
+    "setattr", 
+    "setsize",
 
     /* I/O operations */
-    "================ I/O operations ================", "read", "do_cow_write",
-    "cow_write", "get_block", "write", "handle_partial_block",
+    "================ I/O operations ================", 
+    "read", 
+    "do_cow_write",
+    "cow_write", 
+    "get_block", 
+    "write", 
+    "handle_partial_block",
 
     /* Memory operations */
-    "============== Memory operations ===============", "memcpy_read_media",
-    "memcpy_write_media", "memcpy_write_back_to_media",
+    "============== Memory operations ===============", 
+    "memcpy_read_media",
+    "memcpy_write_media", 
+    "memcpy_write_back_to_media",
 
     /* Memory management */
-    "============== Memory management ===============", "alloc_blocks",
-    "new_data_blocks", "free_blocks", "free_data_blocks", "free_log_blocks",
-    "reserve_pkg", "reserve_pkg_in_layout", "tl_alloc_meta", "tl_alloc_blk",
+    "============== Memory management ===============", 
+    "alloc_blocks",
+    "new_data_blocks", 
+    "free_blocks", 
+    "free_data_blocks", 
+    "free_log_blocks",
+    "reserve_pkg", 
+    "reserve_pkg_in_layout", 
+    "tl_alloc_meta", 
+    "tl_alloc_blk",
 
     /* Transaction */
-    "================= Transaction ==================", "transaction_new_inode",
-    "transaction_new_data", "transaction_new_unlink", "transaction_new_attr",
-    "transaction_new_rename", "transaction_new_link", "transaction_new_symlink",
+    "================= Transaction ==================", 
+    "transaction_new_inode",
+    "transaction_new_data", 
+    "transaction_new_unlink", 
+    "transaction_new_attr",
+    "transaction_new_rename", 
+    "transaction_new_link", 
+    "transaction_new_symlink",
     "write_once_commit",
 
     /* Others */
-    "================ Miscellaneous =================", "fsync", "write_pages",
-    "fallocate", "direct_IO", "free_old_entry", "delete_file_tree",
-    "delete_dir_tree", "new_vfs_inode", "new_hk_inode", "free_inode",
-    "free_inode_log", "evict_inode", "test_perf", "wprotect",
-    "bitmap_find_free", "process_reclaim_request", "data_claim",
+    "================ Miscellaneous =================", 
+    "fsync", 
+    "write_pages",
+    "fallocate", 
+    "direct_IO", 
+    "free_old_entry", 
+    "delete_file_tree",
+    "delete_dir_tree", 
+    "new_vfs_inode", 
+    "new_hk_inode", 
+    "free_inode",
+    "free_inode_log", 
+    "evict_inode", 
+    "test_perf", 
+    "wprotect",
+    "bitmap_find_free", 
+    "process_reclaim_request", 
+    "data_claim",
 
     /* Rebuild */
-    "=================== Rebuild ====================", "rebuild_dir",
-    "rebuild_file", "imm_set_bitmap", "imm_clear_bitmap",
+    "=================== Rebuild ====================", 
+    "rebuild_dir",
+    "rebuild_file", 
+    "imm_set_bitmap", 
+    "imm_clear_bitmap",
 
     /* Meta Operations */
-    "=================== Meta ===================", "valid_summary_header",
-    "invalid_summary_header", "request_valid_block", "request_invalid_block",
-    "prepare_request", "commit_newattr",
+    "=================== Meta ===================", 
+    "valid_summary_header",
+    "invalid_summary_header", 
+    "request_valid_block", 
+    "request_invalid_block",
+    "prepare_request", 
+    "commit_newattr",
 
-    "=================== LinIX ===================", "linix_set", "linix_get"};
+    "=================== LinIX ===================", 
+    "linix_set", 
+    "linix_get"
+};
+// clang-format on
 
 u64 Timingstats[TIMING_NUM];
 u64 Countstats[TIMING_NUM];

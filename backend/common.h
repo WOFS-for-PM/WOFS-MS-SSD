@@ -29,6 +29,13 @@ int thread_data_init(struct thread_data *td, int iodepth, int bs,
                      char *dev_path);
 int thread_data_cleanup(struct thread_data *td);
 
+// IO ops
+int io_write();
+int io_read();
+int io_sync();
+int io_open();
+int io_close();
+
 // IO ring driver
 int ioring_init(struct thread_data *td, int sqpoll_cpu);
 enum q_status ioring_queue(struct thread_data *td, unsigned long long offset,
