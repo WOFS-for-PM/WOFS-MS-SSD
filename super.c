@@ -1,8 +1,13 @@
+#include <assert.h>
+#include "backend/common.h"
 #include "killer.h"
+#include "stats.h"
 
 int measure_timing;
 int wprotect;
 int support_clwb;
+
+#define DEV_HANDLER_PTR(sbi) &((sbi)->fast_dev.td)
 
 static inline void set_default_opts(struct hk_sb_info *sbi) {
     set_opt(sbi->s_mount_opt, ERRORS_CONT);
@@ -13,18 +18,17 @@ static inline void set_default_opts(struct hk_sb_info *sbi) {
 // Only support NVMe for now in Userspace
 static int hk_get_device_info(struct super_block *sb, struct hk_sb_info *sbi) {
     int ret;
+    int *options, sq_poll_cpu = -1;
+    options = kzalloc(sizeof(int), GFP_KERNEL);
+    *options = sq_poll_cpu;
 
-    assert(!ioring_test());
-    
-    ret = thread_data_init(&sbi->fast_dev.td, IO_DEPTH, HK_BLK_SZ, DEV_PATH);
-    if (ret) {
-        BUG_ON(1);
-    }
-    
-    ret = ioring_init(&sbi->fast_dev.td, -1);
-    if (ret) {
-        BUG_ON(1);
-    }
+    io_register();
+    ret = thread_data_init(DEV_HANDLER_PTR(sbi), IO_DEPTH, HK_BLK_SZ, DEV_PATH,
+                           options);
+    BUG_ON(ret);
+
+    ret = io_open(DEV_HANDLER_PTR(sbi), "uring");
+    BUG_ON(ret);
 
     return 0;
 }
@@ -55,15 +59,18 @@ int hk_fill_super(struct super_block *sb, void *data, int silent) {
     }
 
 out:
+    HK_END_TIMING(mount_t, mount_time);
     return 0;
 }
 
 void hk_put_super(struct super_block *sb) {
     struct hk_sb_info *sbi = HK_SB(sb);
     
-    ioring_cleanup(&sbi->fast_dev.td);
-    thread_data_cleanup(&sbi->fast_dev.td);
+    io_close(DEV_HANDLER_PTR(sbi));
+    thread_data_cleanup(DEV_HANDLER_PTR(sbi));
 
     kfree(sbi);
+
+    io_unregister();
     sb->s_fs_info = NULL;
 }

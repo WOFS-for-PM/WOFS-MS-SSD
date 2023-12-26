@@ -26,6 +26,7 @@
 #include <unistd.h>
 #include <x86intrin.h>
 #include <stdatomic.h>
+#include <signal.h>
 
 #include "kernel.h"
 
@@ -185,19 +186,60 @@ static inline s64 atomic64_read(const atomic64_t *v) {
 #define atomic64_set atomic64_set
 #define atomic64_add_return atomic64_add_return
 #define atomic64_add_return_relaxed atomic64_add_return
+#define ATOMIC64_INIT(i) \
+    { (i) }
 
 typedef pthread_spinlock_t spinlock_t;
 #define spin_lock_init(lock) pthread_spin_init(lock, PTHREAD_PROCESS_PRIVATE);
 #define spin_lock(lock) pthread_spin_lock(lock);
 #define spin_unlock(lock) pthread_spin_unlock(lock);
 
+struct task_struct {
+    struct list_head list;
+    atomic64_t should_stop;
+    pthread_t t;
+};
+
+static LIST_HEAD(tasks);
+
+static inline struct task_struct *kthread_create(int (*threadfn)(void *data),
+                                                 void *data,
+                                                 const char *namefmt, ...) {
+    struct task_struct *task;
+    task = malloc(sizeof(struct task_struct));
+    pthread_create(&task->t, NULL, (void *(*)(void *))threadfn, data);
+    list_add_tail(&task->list, &tasks);
+    return task;
+}
+
+static inline bool kthread_should_stop(void) {
+    pthread_t t = pthread_self();
+    struct task_struct *task;
+    list_for_each_entry(task, &tasks, list) {
+        if (pthread_equal(task->t, t)) {
+            return !!atomic64_read(&task->should_stop);
+        }
+    }
+    return false;
+}
+
+static inline int kthread_stop(struct task_struct *k) {
+    atomic64_set(&k->should_stop, 1);
+    pthread_join(k->t, NULL);
+    list_del(&k->list);
+    free(k);
+    return 0;
+}
+
 struct super_block {
     void *s_fs_info;
 };
 
-#define __stringify_1(x...)	#x
-#define __stringify(x...)	__stringify_1(x)
+#define schedule() sched_yield()
 
-#endif // __KERNEL__
+#define __stringify_1(x...) #x
+#define __stringify(x...) __stringify_1(x)
 
-#endif // __LINUX_PORT_H
+#endif  // __KERNEL__
+
+#endif  // __LINUX_PORT_H

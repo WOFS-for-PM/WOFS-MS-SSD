@@ -164,10 +164,16 @@ static int __ioring_register_files(struct thread_data *td) {
     return ret;
 }
 
-int ioring_init(struct thread_data *td, int sqpoll_cpu) {
+static int ioring_init(struct thread_data *td) {
     struct ioring_data *ld;
+    int sqpoll_cpu;
     int iodepth = td->iodepth;
     int i, err;
+
+    if (td->options)
+        sqpoll_cpu = *(int *)td->options;
+    else
+        sqpoll_cpu = -1;
 
     // NOTE: calloc will initialize all memory to 0
     ld = calloc(1, sizeof(*ld));
@@ -207,6 +213,54 @@ int ioring_init(struct thread_data *td, int sqpoll_cpu) {
     return 0;
 }
 
+static int ioring_prep(struct thread_data *td, struct io_u *io_u) {
+    struct ioring_data *ld = td->io_ops_data;
+    unsigned long long offset = io_u->offset;
+    int sqe_idx = io_u->idx;
+    struct io_uring_sqe *sqe;
+    u8 ioring_op_code = IORING_OP_NOP;
+    sqe = &ld->sqes[sqe_idx];
+    memset(sqe, 0, sizeof(*sqe));
+
+    switch (io_u->opcode) {
+        case IO_READ:
+            ioring_op_code = IORING_OP_READ_FIXED;
+            break;
+        case IO_WRITE:
+            ioring_op_code = IORING_OP_WRITE_FIXED;
+            break;
+        case IO_SYNC:
+            ioring_op_code = IORING_OP_FSYNC;
+            break;
+        default:
+            BUG_ON(1);
+    }
+
+    // NOTE: we only support one raw device file
+    sqe->fd = 0;
+    sqe->flags = IOSQE_FIXED_FILE;
+
+    if (ioring_op_code == IORING_OP_FSYNC) {
+        sqe->opcode = ioring_op_code;
+        sqe->addr = 0;
+        sqe->len = 0;
+        sqe->off = 0;
+        sqe->buf_index = 0;
+        sqe->user_data = (unsigned long long)io_u;
+    } else {
+        sqe->opcode = ioring_op_code;
+        assert(ld->iovecs[sqe_idx].iov_base == io_u->buf);
+        sqe->addr = (unsigned long)io_u->buf;
+        sqe->len = ld->iovecs[sqe_idx].iov_len;
+        sqe->off = offset;
+        sqe->buf_index = sqe_idx;
+        // For notify kernel that `io_u` is done
+        sqe->user_data = (unsigned long long)io_u;
+    }
+
+    return 0;
+}
+
 /**
  * @brief put a I/O request into the queue
  *
@@ -217,11 +271,10 @@ int ioring_init(struct thread_data *td, int sqpoll_cpu) {
  * @param opcode IORING_OP_READ_FIXED, IORING_OP_WRITE_FIXED
  * @return enum q_status
  */
-enum q_status ioring_queue(struct thread_data *td, unsigned long long offset,
-                           int sqe_idx, int opcode) {
+static enum q_status ioring_queue(struct thread_data *td, struct io_u *io_u) {
     struct ioring_data *ld = td->io_ops_data;
     struct io_sq_ring *ring = &ld->sq_ring;
-    struct io_uring_sqe *sqe;
+    int sqe_idx = io_u->idx;
     unsigned tail, next_tail;
 
     if (ld->queued == ld->iodepth)
@@ -233,21 +286,6 @@ enum q_status ioring_queue(struct thread_data *td, unsigned long long offset,
 
     if (next_tail == *ring->head)
         return Q_BUSY;
-
-    sqe = &ld->sqes[sqe_idx];
-    memset(sqe, 0, sizeof(*sqe));
-
-    sqe->fd = 0;
-    sqe->flags = IOSQE_FIXED_FILE;
-
-    sqe->opcode = opcode;
-    sqe->addr = (unsigned long)ld->iovecs[sqe_idx].iov_base;
-    sqe->len = ld->iovecs[sqe_idx].iov_len;
-    sqe->off = offset;
-    sqe->buf_index = sqe_idx;
-
-    // For notify kernel that `idx` is done
-    sqe->user_data = (unsigned long long)sqe_idx;
 
     // printf("%s: sqe->fd = %d, sqe->opcode = %d, sqe->addr = %p, sqe->len = "
     //        "%lu, sqe->buf_index = %lu, ring_index = %lu\n",
@@ -270,10 +308,10 @@ static int __io_uring_enter(struct ioring_data *ld, unsigned int to_submit,
                    flags, NULL, 0);
 }
 
-int ioring_commit(struct thread_data *td) {
+static int ioring_commit(struct thread_data *td) {
     struct ioring_data *ld = td->io_ops_data;
     struct io_sq_ring *ring = &ld->sq_ring;
-    int ret;
+    int ret, commit = 0;
 
     if (ld->queued == 0)
         return 0;
@@ -281,6 +319,7 @@ int ioring_commit(struct thread_data *td) {
     read_barrier();
     if (*ring->flags & IORING_SQ_NEED_WAKEUP) {
         ret = __io_uring_enter(ld, ld->queued, 0, IORING_ENTER_SQ_WAKEUP);
+        commit = ld->queued;
         if (ret < 0) {
             BUG_ON(1);
             return ret;
@@ -288,7 +327,7 @@ int ioring_commit(struct thread_data *td) {
     }
 
     ld->queued = 0;
-    return 0;
+    return commit;
 }
 
 static int __ioring_cqring_reap(struct thread_data *td, unsigned int events,
@@ -311,13 +350,31 @@ static int __ioring_cqring_reap(struct thread_data *td, unsigned int events,
     return reaped;
 }
 
-int ioring_getevents(struct thread_data *td, unsigned int min,
-                     unsigned int max) {
+static struct io_u *ioring_event(struct thread_data *td, int event) {
+    struct ioring_data *ld = td->io_ops_data;
+    struct io_uring_cqe *cqe;
+    struct io_u *io_u;
+    unsigned index;
+
+    index = (event + ld->cq_ring_off) & ld->cq_ring_mask;
+
+    cqe = &ld->cq_ring.cqes[index];
+    io_u = (struct io_u *)cqe->user_data;
+
+    return io_u;
+}
+
+static int ioring_getevents(struct thread_data *td, unsigned int min,
+                            unsigned int max) {
     struct ioring_data *ld = td->io_ops_data;
     struct io_cq_ring *ring = &ld->cq_ring;
     unsigned long tries = 0, retries = 0;
     unsigned events = 0;
-    int r, ret;
+    struct io_u *io_u;
+    int r, ret, i;
+
+    if (ld->queued == 0)
+        return 0;
 
     ld->cq_ring_off = *ring->head;
 
@@ -328,6 +385,10 @@ retry:
         r = __ioring_cqring_reap(td, events, max);
         if (r) {
             events += r;
+            for (i = 0; i < r; i++) {
+                io_u = ioring_event(td, i);
+                mark_io_u_complete(td, io_u);
+            }
             if (min != 0)
                 min -= r;
             continue;
@@ -349,23 +410,7 @@ retry:
     return r < 0 ? r : events;
 }
 
-int ioring_event(struct thread_data *td, int event) {
-    struct ioring_data *ld = td->io_ops_data;
-    struct io_uring_cqe *cqe;
-    unsigned long long sqe_idx;
-    unsigned index;
-
-    index = (event + ld->cq_ring_off) & ld->cq_ring_mask;
-
-    cqe = &ld->cq_ring.cqes[index];
-    sqe_idx = (unsigned long long)cqe->user_data;
-
-    // printf("res: %d\n", cqe->res);
-
-    return (int)sqe_idx;
-}
-
-void ioring_cleanup(struct thread_data *td) {
+static void ioring_cleanup(struct thread_data *td) {
     struct ioring_data *ld = td->io_ops_data;
 
     if (ld) {
@@ -377,33 +422,60 @@ void ioring_cleanup(struct thread_data *td) {
     }
 }
 
-int ioring_test(void) {
+static bool ioring_ack(struct thread_data *td, struct io_u *io_u) {
+    if (io_u->opcode != IO_READ) {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+static int ioring_test(void) {
     struct thread_data td;
     int write_iovec_idx = 0;
     int read_iovec_idx = 1;
     int ofs = 0;
+    int sqpoll_cpu = -1;
+    struct io_u *io_u;
 
-    assert(!thread_data_init(&td, 32, 4096, "/dev/nvme0n1p1"));
-    assert(!ioring_init(&td, -1));
+    printf("%s called!\n", __func__);
+
+    assert(!thread_data_init(&td, 32, 4096, "/dev/nvme0n1p1", &sqpoll_cpu));
+    assert(!ioring_init(&td));
+
+    struct io_u io_u_w = {
+        .offset = ofs,
+        .idx = write_iovec_idx,
+        .opcode = IO_WRITE,
+        .buf = td.buf + write_iovec_idx * 4096,
+    };
+    struct io_u io_u_r = {
+        .offset = ofs,
+        .idx = read_iovec_idx,
+        .opcode = IO_READ,
+        .buf = td.buf + read_iovec_idx * 4096,
+    };
 
     memcpy(td.buf, "STAR", 4);
-    ioring_queue(&td, ofs, write_iovec_idx, IORING_OP_WRITE_FIXED);
+    ioring_prep(&td, &io_u_w);
+    ioring_queue(&td, &io_u_w);
     ioring_commit(&td);
 
     int events = ioring_getevents(&td, 1, 1);
     for (int i = 0; i < events; i++) {
-        int idx = ioring_event(&td, i);
-        printf("sqe at %d finished\n", idx);
+        io_u = ioring_event(&td, i);
+        printf("sqe at %d finished\n", io_u->idx);
     }
 
     memset(td.buf, 0, 5);
 
-    ioring_queue(&td, ofs, read_iovec_idx, IORING_OP_READ_FIXED);
+    ioring_prep(&td, &io_u_r);
+    ioring_queue(&td, &io_u_r);
     ioring_commit(&td);
     events = ioring_getevents(&td, 1, 1);
     for (int i = 0; i < events; i++) {
-        int idx = ioring_event(&td, i);
-        printf("sqe at %d finished\n", idx);
+        io_u = ioring_event(&td, i);
+        printf("sqe at %d finished\n", io_u->idx);
     }
     char buf[5] = {0};
     memcpy(buf, td.buf + read_iovec_idx * 4096, 4);
@@ -414,3 +486,17 @@ int ioring_test(void) {
     thread_data_cleanup(&td);
     return 0;
 }
+
+struct ioengine_ops uring_io_ops = {
+    .name = "uring",
+    .init = ioring_init,
+    .prep = ioring_prep,
+    .cleanup = ioring_cleanup,
+    .queue = ioring_queue,
+    .commit = ioring_commit,
+    .getevents = ioring_getevents,
+    .event = ioring_event,
+    .ack = ioring_ack,
+    .unit_test = ioring_test,
+};
+EXPORT_SYMBOL(uring_io_ops);
