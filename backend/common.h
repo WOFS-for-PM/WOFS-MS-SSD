@@ -19,6 +19,7 @@
 
 #define O_IO_CACHED 0x1
 #define O_IO_DROP 0x2
+#define O_IO_AUTO 0x4
 
 enum q_status {
     Q_COMPLETED = 0, /* completed sync */
