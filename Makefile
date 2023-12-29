@@ -1,5 +1,5 @@
 ABS_PATH=$(shell pwd)
-CFLAGS=-fPIC -mclwb -mclflushopt -Wall -pthread -mavx512f -I. -DBITS_PER_LONG=64 -lkp -L$(ABS_PATH)/linux -Wl,-rpath=$(ABS_PATH)/linux
+CFLAGS=-fPIC -mclwb -mclflushopt -Wall -pthread -mavx512f -I. -DBITS_PER_LONG=64 -DKBUILD_MODNAME=\"KILLER\" -lkp -L$(ABS_PATH)/linux -Wl,-rpath=$(ABS_PATH)/linux
 CC=gcc
 
 .PHONY: default
@@ -19,14 +19,13 @@ DEV_PATH := /dev/nvme0n1p1
 
 DEBUG ?= 0
 ifeq ($(DEBUG), 1)
-	CFLAGS += -g
+	CFLAGS += -g -DDEBUG
 	OPTS := -O0
 endif
 
 CFLAGS += $(OPTS)
 
 all: libkiller.so
-
 
 libkiller.so: libkp.so killer.a wrapper.c ffile.o
 	$(CC) -shared $(CFLAGS) -o build/libkiller.so wrapper.c build/killer.a build/ffile.o -ldl -lkp
@@ -62,7 +61,7 @@ fio-strace:
 	sudo bash scripts/run_killer_trace.sh fio -filename=./trace/test-killer -fallocate=none -direct=0 -iodepth 1 -rw=write -ioengine=sync -bs=4K -size=128k -name=write -thread
 
 gdb:
-	sudo gdb -x scripts/.gdbinit tests/test
+	sudo gdb -x scripts/.gdbinit $(shell pwd)/tests/test
 
 clean:
 	rm -r build/*

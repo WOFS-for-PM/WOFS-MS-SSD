@@ -22,7 +22,7 @@ static int hk_get_device_info(struct super_block *sb, struct hk_sb_info *sbi) {
     options = kzalloc(sizeof(int), GFP_KERNEL);
     *options = sq_poll_cpu;
 
-    io_register();
+    io_register(false);
     ret = thread_data_init(DEV_HANDLER_PTR(sbi), IO_DEPTH, HK_BLK_SZ, DEV_PATH,
                            options);
     BUG_ON(ret);
@@ -65,7 +65,7 @@ out:
 
 void hk_put_super(struct super_block *sb) {
     struct hk_sb_info *sbi = HK_SB(sb);
-    
+
     io_close(DEV_HANDLER_PTR(sbi));
     thread_data_cleanup(DEV_HANDLER_PTR(sbi));
 

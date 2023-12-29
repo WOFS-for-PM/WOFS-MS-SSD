@@ -1,4 +1,4 @@
-CFLAGS=-mclwb -mclflushopt -Wall -pthread
+CFLAGS=-mclwb -mclflushopt -Wall -pthread -DBITS_PER_LONG=64
 CDEBUG=-g
 CRELEASE=-O3
 

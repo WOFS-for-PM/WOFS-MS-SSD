@@ -64,7 +64,7 @@
 #endif  // DEV_PATH
 
 #ifndef IO_DEPTH
-#define IO_DEPTH 32
+#define IO_DEPTH num_online_cpus()
 #endif  // IO_DEPTH
 
 /*

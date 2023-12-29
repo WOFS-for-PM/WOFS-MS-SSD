@@ -9,8 +9,8 @@ C_OBJS        := $(patsubst %.c,%.o,$(C_SRCS))
 
 OBJS            := $(C_OBJS)
 
-LDFLAG          := -Wall -g -pthread -lrt  -ldl  -L. -lkp
-CFLAG_OBJS      := -Wall -Werror -I. -g  -fPIC -Wno-error=unused-function 
+LDFLAG          := -Wall -g -pthread -lrt  -ldl  -L. -lkp -DBITS_PER_LONG=64
+CFLAG_OBJS      := -Wall -Werror -I. -g  -fPIC -Wno-error=unused-function -DBITS_PER_LONG=64
 TARGET          := test
 TARGET_LIB      := libkp.a
 TARGET_SO       := libkp.so

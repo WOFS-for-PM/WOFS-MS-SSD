@@ -11,21 +11,11 @@
 /*
  * Debug code
  */
+#ifdef KBUILD_MODNAME
 #ifdef pr_fmt
 #undef pr_fmt
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+#define pr_fmt(fmt) "[" KBUILD_MODNAME "]: " fmt
 #endif
-
-#ifndef __KERNEL__
-extern int smp_processor_id(void);
-extern int num_online_cpus(void);
-#endif
-
-#ifndef __KERNEL__
-// color: info: none, warn: yellow, error: red
-#define pr_info(s, args...) printf("INFO (%d): "s, getpid(), ##args)
-#define pr_warn(s, args...) printf("\033[0;33m" s "\033[0m", ##args)
-#define pr_error(s, args...) printf("\033[0;31m" s "\033[0m", ##args)
 #endif
 
 /* #define hk_dbg(s, args...)		pr_debug(s, ## args) */

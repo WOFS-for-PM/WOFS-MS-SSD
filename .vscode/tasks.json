@@ -3,10 +3,8 @@
         {
             "type": "cppbuild",
             "label": "KILLER-DEBUG Compile",
-            "command": "make",
-            "args": [
-                "DEBUG=1"
-            ],
+            "command": "./scripts/prep_debug.sh",
+            "args": [],
             "options": {
                 "cwd": "${workspaceFolder}"
             },

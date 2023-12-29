@@ -1,5 +1,3 @@
-#define _GNU_SOURCE /* See feature_test_macros(7) */
-#include <sched.h>
 #include <stdio.h>
 
 #ifndef __PORTING_H__

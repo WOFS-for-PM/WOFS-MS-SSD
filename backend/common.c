@@ -1,13 +1,32 @@
 #include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 #include "common.h"
+#include "linux/kernel.h"
 
 #define PREDEFINED_PAGE_SIZE 4096
 #define PREDEFINED_CACHE_LINE_SIZE 64
 #define CACHE_LINE_FILE \
     "/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size"
 
+#define GREEN "\033[0;32m"
+#define BLACK "\033[0m"
+#define BOLD "\033[1m"
+
+#ifdef pr_fmt
+#undef pr_fmt
+#define pr_fmt(fmt) GREEN BOLD "[IOCOMMON]: " BLACK fmt
+#endif
+
+#define pr_milestone(fmt, ...)         \
+    printf(GREEN BOLD "["              \
+                      "MILESTONE"      \
+                      "]: " fmt BLACK, \
+           ##__VA_ARGS__)
+
+int io_measure_timing = 1;
+// ==================== utils ====================
 static inline int arch_cache_line_size(void) {
     char size[32];
     int fd, ret;
@@ -46,43 +65,322 @@ static inline int os_page_size(void) {
     return size;
 }
 
-// [io_u_idx_start, io_u_idx_end)
-struct io_unode {
-    struct list_head list;
-    int io_u_idx_start;
-    int io_u_idx_end;
-};
+// ==================== ioengine helpers ====================
+static int __io_check_in_range(struct io_u *io_u, off_t offset, size_t len) {
+    pr_debug("io_u->offset: %ld, io_u->cap: %ld, offset: %ld, len: %ld\n",
+             io_u->offset, io_u->cap, offset, len);
+    return io_u->offset >= offset && io_u->offset + io_u->cap <= offset + len;
+}
 
-static int complete_ack_thread(void *arg) {
-    struct thread_data *td = arg;
-    struct io_u *io_u;
-    int ret;
+static int __insert_working_tree(struct thread_data *td, struct io_u *io_u,
+                                 struct io_u **exist) {
+    struct io_u *cur;
+    struct rb_node **temp, *parent = NULL;
+    int compVal;
 
-    if (!td->io_ops->ack) {
-        return 0;
+    temp = &td->working_tree.rb_node;
+    if (exist)
+        *exist = NULL;
+    while (*temp) {
+        cur = container_of(*temp, struct io_u, rb_node);
+        parent = *temp;
+        compVal = io_u->offset - cur->offset;
+        if (compVal < 0)
+            temp = &parent->rb_left;
+        else if (compVal > 0)
+            temp = &parent->rb_right;
+        else {
+            if (exist)
+                *exist = cur;
+            pr_debug("%s: %ld exists\n", __func__, io_u->offset);
+            return -EINVAL;
+        }
     }
 
-    while (!kthread_should_stop()) {
-        for (int i = 0; i < td->iodepth; i++) {
-            io_u = &td->io_us[i];
+    rb_link_node(&io_u->rb_node, parent, temp);
+    rb_insert_color(&io_u->rb_node, &td->working_tree);
 
-            if (test_bit(io_u->idx, td->comp_bm)) {
-                ret = td->io_ops->ack(td, io_u);
-                if (ret) {
-                    clear_bit(io_u->idx, td->comp_bm);
-                    mark_io_u_available(td, io_u);
-                }
+    return 0;
+}
+
+static int __search_working_tree(struct thread_data *td, off_t offset,
+                                 struct io_u **io_u) {
+    struct io_u *cur;
+    struct rb_node *temp;
+    int compVal;
+
+    temp = td->working_tree.rb_node;
+    while (temp) {
+        cur = container_of(temp, struct io_u, rb_node);
+        compVal = offset - cur->offset;
+        if (compVal < 0)
+            temp = temp->rb_left;
+        else if (compVal > 0)
+            temp = temp->rb_right;
+        else {
+            *io_u = cur;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int __remove_working_tree(struct thread_data *td, struct io_u *io_u) {
+    pr_debug("%s: %ld\n", __func__, io_u->offset);
+#ifdef DEBUG
+    int ret;
+    ret = __search_working_tree(td, io_u->offset, &io_u);
+    if (!ret) {
+        pr_debug("%s: %ld not found\n", __func__, io_u->offset);
+        return -EINVAL;
+    }
+#endif
+    rb_erase(&io_u->rb_node, &td->working_tree);
+    return 0;
+}
+
+static int __mark_io_u_available(struct thread_data *td, struct io_u *io_u) {
+#ifdef DEBUG
+    assert(!!test_bit(io_u->idx, td->avai_bm) == 0);
+#endif
+    set_bit(io_u->idx, td->avai_bm);
+#ifdef DEBUG
+    pr_debug("%s: %d\n", __func__, io_u->idx);
+#endif
+    return 0;
+}
+
+static int __try_mark_io_u_available(struct thread_data *td,
+                                     struct io_u *io_u) {
+    if (io_u->flags & O_IO_CACHED) {
+        pr_debug("%s: io_u at buf %d is cached (it is hanged)\n", __func__,
+                 io_u->idx);
+        return 0;
+    }
+    __mark_io_u_available(td, io_u);
+    return 1;
+}
+
+static int __mark_io_u_working(struct thread_data *td, struct io_u *io_u) {
+    clear_bit(io_u->idx, td->avai_bm);
+    return 0;
+}
+
+#define REAP_MIN_AUTO -1
+#define REAP_MAX_AUTO -1
+
+static int __io_reap(struct thread_data *td, int min, int max,
+                     int (*process)(struct thread_data *, struct io_u *,
+                                    void *data),
+                     void *data) {
+    int r, i, ret;
+    struct io_u *io_u;
+    IO_INIT_TIMING(time);
+
+    IO_START_TIMING(reap_t, time);
+
+    assert(td->io_ops->commit);
+    // Wake up the sq thread
+    ret = td->io_ops->commit(td);
+    td->inflight += ret;
+    // We should have committed
+    // io_u immediately after
+    // __io_queue
+    assert(ret == 0);
+
+    min = min == REAP_MIN_AUTO ? ret : min;
+    max = max == REAP_MAX_AUTO ? ret : max;
+
+    assert(td->io_ops->getevents);
+
+    r = td->io_ops->getevents(td, min, max);
+    assert(r >= min);
+    td->inflight -= r;
+
+    assert(td->io_ops->event);
+    for (i = 0; i < r; i++) {
+        io_u = td->io_ops->event(td, i);
+        if (process) {
+            ret = process(td, io_u, data);
+            if (ret) {
+                pr_warn("%s: process failed\n", __func__);
+                return ret;
             }
         }
+    }
+
+    IO_END_TIMING(reap_t, time);
+
+    return r;
+}
+
+static int __io_queue(struct thread_data *td, int io_u_idx) {
+    struct io_u *io_u = &td->io_us[io_u_idx];
+    enum q_status state;
+    int retries = 0;
+    int queued = 0;
+
+    assert(td->io_ops->prep);
+    td->io_ops->prep(td, io_u);
+
+    assert(td->io_ops->queue);
+retry:
+    state = td->io_ops->queue(td, io_u);
+
+    assert(td->io_ops->commit);
+    queued = td->io_ops->commit(td);
+    assert(queued == 1);
+
+    if (unlikely(retries > QUEUE_MAX_TRIES(td))) {
+        // TODO: force commit?
+        BUG_ON(1);
+    }
+    if (state == Q_BUSY) {
+        assert(td->io_ops->commit);
+        td->io_ops->commit(td);
         schedule();
+        retries++;
+        pr_warn("%s: queue busy, retry %d\n", __func__, retries);
+        goto retry;
+    }
+
+    td->inflight++;
+
+    return queued;
+}
+
+struct io_reap_data {
+    struct list_head io_us;
+    void *data;
+};
+
+struct io_reap_wrapper {
+    struct list_head list;
+    struct io_u *io_u;
+};
+
+static inline int __io_reap_data_init(struct io_reap_data *d) {
+    INIT_LIST_HEAD(&d->io_us);
+    return 0;
+}
+
+static inline int __io_reap_data_cleanup(struct io_reap_data *d) {
+    struct io_reap_wrapper *w, *tmp;
+    list_for_each_entry_safe(w, tmp, &d->io_us, list) {
+        list_del(&w->list);
+        free(w);
     }
     return 0;
 }
 
+static int __io_reap_for_nonread(struct thread_data *td, struct io_u *io_u,
+                                 void *data) {
+    assert(io_u->opcode != IO_READ);
+    if (__try_mark_io_u_available(td, io_u))
+        __remove_working_tree(td, io_u);
+    return 0;
+}
+
+static int __io_reap_for_get_io_u(struct thread_data *td, struct io_u *io_u,
+                                  void *data) {
+    struct io_reap_data *d = data;
+    struct io_reap_wrapper *w;
+
+    if (__try_mark_io_u_available(td, io_u))
+        __remove_working_tree(td, io_u);
+
+    if (!list_empty(&d->io_us)) {
+        w = calloc(1, sizeof(struct io_reap_wrapper));
+        w->io_u = io_u;
+        list_add_tail(&w->list, &d->io_us);
+    }
+
+    return 0;
+}
+
+struct io_read_data {
+    char *buf;
+    size_t len;
+    size_t offset;
+};
+
+static int __io_reap_for_reader(struct thread_data *td, struct io_u *io_u,
+                                void *data) {
+    struct io_read_data *d = ((struct io_reap_data *)data)->data;
+    char *buf = d->buf;
+    size_t req_len = d->len;
+    size_t req_offset = d->offset;
+    size_t bias = 0, len;
+
+    __try_mark_io_u_available(td, io_u);
+    bias = req_offset - io_u->offset;
+    pr_debug("%s: bias %ld\n", __func__, bias);
+    if (bias > 0) {
+        len = io_u->cap - bias > req_len ? req_len : io_u->cap - bias;
+        memcpy(buf, io_u->buf + bias, len);
+    } else {
+        len = bias + req_len > io_u->cap ? io_u->cap : bias + req_len;
+        memcpy(buf - bias, io_u->buf, len);
+    }
+
+    return 0;
+}
+
+static int __io_u_avai_count(struct thread_data *td) {
+    return bitmap_weight(td->avai_bm, td->iodepth);
+}
+
+static int __get_io_u(struct thread_data *td, struct io_u **io_u) {
+    int avai = __io_u_avai_count(td);
+    pr_debug("%s: available io_u(s): %d\n", __func__, avai);
+    if (avai == 0) {
+        *io_u = NULL;
+        return -1;
+    }
+
+    int idx = find_first_bit(td->avai_bm, td->iodepth);
+    pr_debug("%s: %d\n", __func__, idx);
+    *io_u = &td->io_us[idx];
+
+    return 0;
+}
+
+static int __get_io_u_slow_path(struct thread_data *td, struct io_u **io_u) {
+    int ret = 0, r;
+    struct io_reap_data d;
+    struct io_reap_wrapper *w;
+
+    pr_debug("%s\n", __func__);
+
+    __io_reap_data_init(&d);
+
+    r = __io_reap(td, 1, td->iodepth, __io_reap_for_get_io_u, &d);
+    assert(r >= 0);
+
+    if (list_empty(&d.io_us)) {
+        // Retry
+        ret = __get_io_u(td, io_u);
+        if (*io_u == NULL) {
+            pr_error("failed to get io_u, there are too many Partial Write "
+                     "in this thread!\n");
+            BUG_ON(1);
+            return -EBUSY;
+        }
+    } else {
+        w = list_first_entry(&d.io_us, struct io_reap_wrapper, list);
+        *io_u = w->io_u;
+    }
+
+    __io_reap_data_cleanup(&d);
+
+    return ret;
+}
+
+// ==================== ioengine ====================
 int thread_data_init(struct thread_data *td, int iodepth, int bs,
                      char *dev_path, void *options) {
     size_t buf_size;
-    struct io_unode *unode;
     int ret;
 
     buf_size = (unsigned long long)iodepth * (unsigned long long)bs;
@@ -101,23 +399,17 @@ int thread_data_init(struct thread_data *td, int iodepth, int bs,
     td->dev_path = dev_path;
     td->options = options;
     td->io_ops = NULL;
-    spin_lock_init(&td->td_lock);
+    td->working_tree = RB_ROOT;
+    td->inflight = 0;
 
-    spin_lock_init(&td->comp_lock);
-    spin_lock_init(&td->avai_lock);
-    td->comp_bm =
+    td->avai_bm =
         kzalloc(BITS_TO_LONGS(iodepth) * sizeof(unsigned long), GFP_KERNEL);
-    INIT_LIST_HEAD(&td->avai_q);
+    // all io_u(s) are available
+    bitmap_set(td->avai_bm, 0, iodepth);
 
-    unode = calloc(1, sizeof(struct io_unode));
-    if (!unode) {
-        perror("calloc");
-        BUG_ON(1);
-        return -ENOMEM;
-    }
-    unode->io_u_idx_start = 0;
-    unode->io_u_idx_end = iodepth;
-    list_add_tail(&unode->list, &td->avai_q);
+    assert(BITS_PER_LONG == 64);
+    pr_debug("%d, %d\n", __io_u_avai_count(td), iodepth);
+    assert(__io_u_avai_count(td) == iodepth);
 
     td->io_us = calloc(iodepth, sizeof(struct io_u));
     if (!td->io_us) {
@@ -130,131 +422,41 @@ int thread_data_init(struct thread_data *td, int iodepth, int bs,
         td->io_us[i].buf = td->buf + i * bs;
         td->io_us[i].cap = bs;
         td->io_us[i].idx = i;
+        td->io_us[i].flags = 0;
     }
 
     return 0;
 }
 
 int thread_data_cleanup(struct thread_data *td) {
-    struct io_unode *unode, *n;
-
-    list_for_each_entry_safe(unode, n, &td->avai_q, list) {
-        list_del(&unode->list);
-        free(unode);
-    }
-    free(td->comp_bm);
+    free(td->avai_bm);
     free(td->buf);
     free(td->io_us);
-
     return 0;
 }
 
-int __get_io_u(struct thread_data *td, struct io_u **io_u) {
-    struct io_unode *unode;
-    int idx;
+static int get_io_u(struct thread_data *td, struct io_u **io_u) {
+    int ret;
+    IO_INIT_TIMING(time);
 
-    spin_lock(&td->avai_lock);
-
-    unode = list_first_entry(&td->avai_q, struct io_unode, list);
-    if (!unode) {
-        spin_unlock(&td->avai_lock);
-        return -1;
-    }
-
-    idx = unode->io_u_idx_start++;
-    if (unode->io_u_idx_start == unode->io_u_idx_end) {
-        list_del(&unode->list);
-        free(unode);
-    }
-    spin_unlock(&td->avai_lock);
-
-    *io_u = &td->io_us[idx];
-
-    return 0;
-}
-
-int get_io_u(struct thread_data *td, struct io_u **io_u) {
-    int ret, min = 1, r;
+    IO_START_TIMING(get_io_u_t, time);
 
     ret = __get_io_u(td, io_u);
-    if (!io_u) {
-        // Digest queued io_u(s)
-        assert(td->io_ops->commit);
-
-        spin_lock(&td->td_lock);
-        min = td->io_ops->commit(td);
-        spin_unlock(&td->td_lock);
-
-        min = min > 0 ? min : 1;
-
-        assert(td->io_ops->getevents);
-        spin_lock(&td->td_lock);
-        r = td->io_ops->getevents(td, min, td->iodepth);
-        spin_unlock(&td->td_lock);
-        assert(r > 0);
-
-        // Retry
-        ret = get_io_u(td, io_u);
-        if (!io_u) {
-            return -EBUSY;
-        }
+    if (*io_u == NULL) {
+        ret = __get_io_u_slow_path(td, io_u);
     }
+    assert(*io_u != NULL);
+
+    __mark_io_u_working(td, *io_u);
+
+    IO_END_TIMING(get_io_u_t, time);
+
     return ret;
-}
-
-int __enqueue_io_u(struct list_head *q, struct io_u *io_u) {
-    struct io_unode *unode;
-    int idx, new_node = 0;
-
-    idx = io_u->idx;
-    unode = list_first_entry(q, struct io_unode, list);
-    if (unode) {
-        if (idx == unode->io_u_idx_start - 1) {
-            unode->io_u_idx_start--;
-        } else if (idx == unode->io_u_idx_end) {
-            unode->io_u_idx_end++;
-        } else {
-            new_node = 1;
-        }
-    }
-
-    if (new_node) {
-        unode = calloc(1, sizeof(struct io_unode));
-        if (!unode) {
-            perror("calloc");
-            BUG_ON(1);
-            return -ENOMEM;
-        }
-        unode->io_u_idx_start = idx;
-        unode->io_u_idx_end = idx + 1;
-        list_add_tail(&unode->list, q);
-    }
-
-    return 0;
-}
-
-int mark_io_u_complete(struct thread_data *td, struct io_u *io_u) {
-    spin_lock(&td->comp_lock);
-    bitmap_set(td->comp_bm, io_u->idx, 1);
-    spin_unlock(&td->comp_lock);
-    return 0;
-}
-
-int mark_io_u_available(struct thread_data *td, struct io_u *io_u) {
-    int ret;
-    spin_lock(&td->avai_lock);
-    ret = __enqueue_io_u(&td->avai_q, io_u);
-    if (ret) {
-        spin_unlock(&td->avai_lock);
-        return ret;
-    }
-    spin_unlock(&td->avai_lock);
-    return 0;
 }
 
 static struct list_head engine_list;
 
-static inline struct ioengine_ops *find_ioengine(const char *name) {
+static inline struct ioengine_ops *__find_ioengine(const char *name) {
     struct ioengine_ops *io_ops;
 
     list_for_each_entry(io_ops, &engine_list, list) {
@@ -276,10 +478,29 @@ static inline void unregister_ioengine(struct ioengine_ops *io_ops) {
 
 extern struct ioengine_ops uring_io_ops;
 
-int io_register(void) {
+// Don't optimize this function
+__optimize("O1") int io_register(bool unit_test) {
+    struct ioengine_ops *io_ops;
+    int ret = 0;
+
     INIT_LIST_HEAD(&engine_list);
     register_ioengine(&uring_io_ops);
-    return 0;
+
+    if (unit_test) {
+        list_for_each_entry(io_ops, &engine_list, list) {
+            if (io_ops->unit_test) {
+                pr_milestone("io engine %s start test\n", io_ops->name);
+                ret = io_ops->unit_test();
+                if (ret) {
+                    pr_info("failed\n");
+                    BUG_ON(1);
+                    return ret;
+                }
+                pr_milestone("io engine %s test end: Success\n", io_ops->name);
+            }
+        }
+    }
+    return ret;
 }
 
 int io_unregister(void) {
@@ -290,21 +511,23 @@ int io_unregister(void) {
 int io_open(struct thread_data *td, const char *e) {
     struct ioengine_ops *io_ops;
 
-    io_ops = find_ioengine(e);
+    io_ops = __find_ioengine(e);
     if (!io_ops) {
-        printf("io engine %s not found\n", e);
+        pr_info("io engine %s not found\n", e);
         return -1;
     }
 
     td->io_ops = io_ops;
-    td->ack_thread = kthread_create(complete_ack_thread, td, NULL);
+
+    assert(td->io_ops->init);
+    td->io_ops->init(td);
 
     return 0;
 }
 
 int io_close(struct thread_data *td) {
-    if (td->ack_thread)
-        kthread_stop(td->ack_thread);
+    assert(td->io_ops->cleanup);
+    td->io_ops->cleanup(td);
     td->io_ops = NULL;
     return 0;
 }
@@ -313,108 +536,271 @@ int io_close(struct thread_data *td) {
 // -1 means no partial write, all io_u(s) are queued
 // -EBUSY means no io_u available
 // >= 0 means partial write, the idx of the io_u that is not queued
-int io_write(struct thread_data *td, off_t offset, char *buf, size_t len) {
-    struct io_u *io_u = NULL;
+// NOTE: if this is a partial write which has been flushed to disk,
+//       caller must use a read-after-write method to ensure the data
+//       is consistent.
+io_ud_t *io_write(struct thread_data *td, off_t offset, char *buf, size_t len,
+                  int flags) {
+    struct io_u *io_u = NULL, *exist = NULL;
     int ret = -1;
-    int i, loop = len / td->bs;
-    size_t per_size;
+    unsigned long index;
+    unsigned long start_index = offset / td->bs;
+    unsigned long end_index = (offset + len - 1) / td->bs;
+    size_t per_size, bias;
 
-    for (i = 0; i < loop; i++) {
+    index = start_index;
+    while (index <= end_index) {
         ret = get_io_u(td, &io_u);
         if (ret) {
-            printf("get_io_u failed\n");
-            return -EBUSY;
+            pr_info("get_io_u failed\n");
+            return NULL;
         }
 
-        per_size = len > td->bs ? td->bs : len;
+#ifdef DEBUG
+        assert(io_u != NULL);
+#endif
+
+        bias = offset & (td->bs - 1);
+        per_size = len + bias > td->bs ? td->bs - bias : len;
 
         io_u->opcode = IO_WRITE;
-        io_u->offset = offset;
-        io_u->len = per_size;
-        memcpy(io_u->buf, buf, per_size);
+        io_u->offset = round_down(offset, td->bs);
+        io_u->flags = flags;
 
-        // When the io_u is full, queue it
-        if ((per_size & (td->bs - 1)) == 0) {
-            assert(td->io_ops->queue);
-
-            spin_lock(&td->td_lock);
-            td->io_ops->queue(td, io_u);
-            spin_unlock(&td->td_lock);
+        __insert_working_tree(td, io_u, &exist);
+        if (exist) {
+            // check if exist is aligned
+            assert((exist->offset & (td->bs - 1)) == 0);
+            // check the requested io_u is in the range of exist
+            assert(__io_check_in_range(io_u, exist->offset, exist->cap));
+            // check if exist is cached
+            assert(exist->flags & O_IO_CACHED);
+            // NOTE: Please use io_drop to drop the cached io_u
+            assert(flags & O_IO_CACHED);
+            __mark_io_u_available(td, io_u);
+            io_u = exist;
+        } else {
+            if (bias != 0) {
+                pr_warn("Partial write without caching: %ld\n", io_u->offset);
+            }
         }
+        io_u->opcode = IO_WRITE;
+        memcpy(io_u->buf + bias, buf, per_size);
 
-        offset += td->bs;
-        len -= td->bs;
-        buf += td->bs;
+        // Queue it any way
+        // But might not release even the
+        // io_u is completed, see flags
+        __io_queue(td, io_u->idx);
+
+        offset += per_size;
+        len -= per_size;
+        buf += per_size;
+        index += 1;
     }
 
-    return io_u->idx;
-}
-
-int __check_in_range(struct io_u *io_u, off_t offset, size_t len) {
-    return io_u->offset >= offset && io_u->offset + io_u->len <= offset + len;
+    if (flags & O_IO_CACHED) {
+        io_ud_t *io_ud = calloc(1, sizeof(io_ud_t));
+        io_ud->offset = offset;
+        io_ud->len = len;
+        return io_ud;
+    } else {
+        return NULL;
+    }
 }
 
 // Must wait for all io_u(s) to be completed
-int io_read(struct thread_data *td, off_t offset, char *buf, size_t len) {
+// TODO: support io_u tree here for cache coherency
+io_ud_t *io_read(struct thread_data *td, off_t offset, char *buf, size_t len,
+                 int flags) {
     struct io_u *io_u = NULL;
-    int ret = -1, r, min = 1;
-    int i, loop = len / td->bs;
-    size_t per_size;
+    int ret = -1;
+    int r, reaped = 0;
+    unsigned long index;
+    unsigned long start_index = offset / td->bs;
+    unsigned long end_index = (offset + len - 1) / td->bs;
+    size_t per_size, bias;
+    struct io_read_data data = {
+        .buf = buf,
+        .len = len,
+        .offset = offset,
+    };
+    struct io_reap_data d = {
+        .data = &data,
+    };
+    __io_reap_data_init(&d);
 
-    for (i = 0; i < loop; i++) {
+    r = end_index - start_index + 1;
+    index = start_index;
+    while (index <= end_index) {
         ret = get_io_u(td, &io_u);
         if (ret) {
-            printf("get_io_u failed\n");
-            return -EBUSY;
+            pr_info("get_io_u failed\n");
+            return NULL;
         }
 
-        per_size = len > td->bs ? td->bs : len;
+        bias = offset & (td->bs - 1);
+        per_size = len + bias > td->bs ? td->bs - bias : len;
 
         io_u->opcode = IO_READ;
-        io_u->offset = offset;
-        io_u->len = per_size;
+        io_u->offset = rounddown(offset, td->bs);
+        io_u->flags = flags;
 
-        assert(td->io_ops->queue);
+        // fetch from cache
+        if (__search_working_tree(td, round_down(offset, td->bs), &io_u)) {
+            __io_reap_for_reader(td, io_u, &d);
+            r--;
+        } else {
+            __io_queue(td, io_u->idx);
+        }
 
-        spin_lock(&td->td_lock);
-        td->io_ops->queue(td, io_u);
-        spin_unlock(&td->td_lock);
-
-        offset += td->bs;
-        len -= td->bs;
-        buf += td->bs;
+        offset += per_size;
+        len -= per_size;
+        buf += per_size;
+        index += 1;
     }
 
-    // Digest queued io_u(s)
-    spin_lock(&td->td_lock);
+    pr_debug("%s: perform %d I/O from device\n", __func__, r);
+    __io_reap(td, r, td->iodepth, __io_reap_for_reader, &d);
+    __io_reap_data_cleanup(&d);
 
-    assert(td->io_ops->commit);
-    min = td->io_ops->commit(td);
+    return 0;
+}
 
-    assert(td->io_ops->getevents);
-    r = td->io_ops->getevents(td, min, td->iodepth);
-    // NOTE: many io_u(s) that belongs to different threads
-    //       may be completed
+// Wait for all io_u(s) to be completed
+int io_sync(struct thread_data *td) {
+    int r;
+    pr_warn("%s: in flight: %d, reaping them all\n", __func__, td->inflight);
+    r = __io_reap(td, td->inflight, td->iodepth, __io_reap_for_nonread, NULL);
     assert(r >= 0);
+    return 0;
+}
 
-    spin_unlock(&td->td_lock);
+// Drop the cached io_u(s) based on io_ud
+int io_drop(struct thread_data *td, io_ud_t *io_ud) {
+    size_t len = io_ud->len;
+    off_t cur, offset = round_down(io_ud->offset, td->bs);
+    struct io_u *io_u;
+    int r = 0;
 
-    while (loop) {
-        for (i = 0; i < td->iodepth; i++) {
-            if (test_bit(i, td->comp_bm)) {
-                io_u = &td->io_us[i];
-                // This is the io_u belongs to this thread
-                if (io_u->opcode == IO_READ &&
-                    __check_in_range(io_u, offset, len)) {
-                    memcpy(buf + io_u->offset, io_u->buf, io_u->len);
-                    clear_bit(i, td->comp_bm);
-                    mark_io_u_available(td, io_u);
-
-                    loop--;
-                }
-            }
+    for (cur = offset; cur < offset + len; cur += td->bs) {
+        if (__search_working_tree(td, cur, &io_u)) {
+            r++;
+            io_u->flags = 0;
+            __mark_io_u_available(td, io_u);
+            __remove_working_tree(td, io_u);
         }
     }
 
+    return r;
+}
+
+// ==================== unit test ====================
+#define BENCH_START(name)           \
+    {                               \
+        struct timespec start, end; \
+        getrawmonotonic(&start);    \
+        io_clear_stats();
+
+#define BENCH_END(name)                                             \
+    getrawmonotonic(&end);                                          \
+    io_show_stats();                                                \
+    pr_milestone("%s done in %lf s\n", name,                        \
+                 (end.tv_sec - start.tv_sec) +                      \
+                     (end.tv_nsec - start.tv_nsec) / 1000000000.0); \
+    }
+
+#define IO_BENCH_START(name)        \
+    {                               \
+        struct timespec start, end; \
+        getrawmonotonic(&start);    \
+        io_clear_stats();
+
+#define IO_BENCH_END(name, size_in_bytes)                             \
+    getrawmonotonic(&end);                                            \
+    io_show_stats();                                                  \
+    pr_milestone("%s done in %lf s, bandwidth %lf MB/s\n", name,      \
+                 (end.tv_sec - start.tv_sec) +                        \
+                     (end.tv_nsec - start.tv_nsec) / 1000000000.0,    \
+                 (double)((double)size_in_bytes / 1024 / 1024) /              \
+                     ((end.tv_sec - start.tv_sec) +                   \
+                      (end.tv_nsec - start.tv_nsec) / 1000000000.0)); \
+    }
+
+static int __sync_read_after_write(struct thread_data *td) {
+    char buf[6] = {0};
+    io_ud_t *io_ud = NULL;
+
+    pr_milestone("UNIT TEST 1: %s\n", __func__);
+    io_ud = io_write(td, 0, "uring", 5, O_IO_DROP);
+    assert(io_ud == NULL);
+    io_sync(td);
+    io_read(td, 0, buf, 5, O_IO_DROP);
+    pr_info("buf %p: %s\n", buf, buf);
+    if (strcmp(buf, "uring") != 0) {
+        pr_warn("Failed to open uring device\n");
+        BUG_ON(1);
+        return -1;
+    }
+    pr_milestone("UNIT TEST 1: %s Success\n", __func__);
+    return 0;
+}
+
+static int __sync_bunch_read_after_bunch_write(struct thread_data *td) {
+    char buf[4096];
+    off_t offset = 0;
+    unsigned long loop = 1024 * 1024, i;
+    io_ud_t *io_ud = NULL;
+
+    memset(buf, 'a', 4096);
+
+    pr_milestone("UNIT TEST 2: %s\n", __func__);
+
+    IO_BENCH_START("write");
+    offset = 0;
+    for (i = 0; i < loop; i++) {
+        io_ud = io_write(td, offset, buf, 4096, O_IO_DROP);
+        assert(io_ud == NULL);
+        offset += 4096;
+    }
+    IO_BENCH_END("write", loop * 4096);
+
+    BENCH_START("sync");
+    io_sync(td);
+    BENCH_END("sync");
+
+    IO_BENCH_START("read");
+    offset = 0;
+    for (i = 0; i < loop; i++) {
+        memset(buf, 0, 4096);
+        io_read(td, offset, buf, 4096, O_IO_DROP);
+        for (int j = 0; j < 4096; j++) {
+            if (buf[j] != 'a') {
+                pr_warn("Failed to open uring device\n");
+                BUG_ON(1);
+                return -1;
+            }
+        }
+        offset += 4096;
+    }
+    IO_BENCH_END("read", loop * 4096);
+
+    pr_milestone("UNIT TEST 2: %s Success\n", __func__);
+    return 0;
+}
+
+int io_test(void) {
+    struct thread_data td;
+    int options = -1;
+
+    io_register(true);
+
+    thread_data_init(&td, num_online_cpus(), 4096, "/dev/nvme0n1p1", &options);
+    io_open(&td, "uring");
+    assert(!__sync_read_after_write(&td));
+    assert(!__sync_bunch_read_after_bunch_write(&td));
+    io_close(&td);
+    thread_data_cleanup(&td);
+
+    io_unregister();
     return 0;
 }

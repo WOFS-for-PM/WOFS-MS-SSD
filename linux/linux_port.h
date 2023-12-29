@@ -2,7 +2,8 @@
 #define __LINUX_PORT_H
 
 #ifndef __KERNEL__
-
+#define _GNU_SOURCE
+#include <sched.h>
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -21,12 +22,14 @@
 #include <sys/statfs.h>
 #include <sys/statvfs.h>
 #include <sys/types.h>
+#include <sys/syscall.h>
 #include <sys/vfs.h>
 #include <time.h>
 #include <unistd.h>
 #include <x86intrin.h>
 #include <stdatomic.h>
 #include <signal.h>
+#include <execinfo.h>
 
 #include "kernel.h"
 
@@ -190,9 +193,10 @@ static inline s64 atomic64_read(const atomic64_t *v) {
     { (i) }
 
 typedef pthread_spinlock_t spinlock_t;
-#define spin_lock_init(lock) pthread_spin_init(lock, PTHREAD_PROCESS_PRIVATE);
-#define spin_lock(lock) pthread_spin_lock(lock);
-#define spin_unlock(lock) pthread_spin_unlock(lock);
+#define spin_lock_init(lock) pthread_spin_init((lock), PTHREAD_PROCESS_PRIVATE)
+#define spin_lock(lock) pthread_spin_lock((lock))
+#define spin_unlock(lock) pthread_spin_unlock((lock))
+#define spin_trylock(lock) pthread_spin_trylock((lock))
 
 struct task_struct {
     struct list_head list;
@@ -239,6 +243,35 @@ struct super_block {
 
 #define __stringify_1(x...) #x
 #define __stringify(x...) __stringify_1(x)
+
+#define pr_fmt(fmt) fmt
+// color: info: none, warn: yellow, error: red
+#define pr_info(s, args...) printf("INFO (%d) " pr_fmt(s), getpid(), ##args)
+#define pr_warn(s, args...)                             \
+    printf("\033[0;33m"                                 \
+           "DEBUG (%d-%ld %s:%d) " pr_fmt(s) "\033[0m", \
+           getpid(), syscall(SYS_gettid), __FILE__, __LINE__, ##args)
+#define pr_error(s, args...) printf("\033[0;31m" s "\033[0m", ##args)
+
+#ifdef DEBUG
+#define pr_debug(s, args...)                            \
+    printf("\033[0;31m"                                 \
+           "DEBUG (%d-%ld %s:%d) " pr_fmt(s) "\033[0m", \
+           getpid(), syscall(SYS_gettid), __FILE__, __LINE__, ##args)
+#else
+#define pr_debug(s, args...)
+#endif
+
+// Get rid of the annoying implicit declaration warning
+extern int sched_getcpu(void);
+
+static inline int smp_processor_id(void) {
+    return sched_getcpu();
+}
+
+static inline int num_online_cpus(void) {
+    return sysconf(_SC_NPROCESSORS_ONLN);
+}
 
 #endif  // __KERNEL__
 

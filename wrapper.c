@@ -6,7 +6,7 @@
 #include "glibc/ffile.h"
 #include "killer.h"
 
-#define WRAPPER_DEBUG
+// #define WRAPPER_DEBUG
 
 #ifdef WRAPPER_DEBUG
 #define PRINT_FUNC pr_info("\tcalled KILLER func: %s\n", __func__)
@@ -371,14 +371,6 @@ void insert_real_op() {
 
 #define OP_DEFINE(op) RETT_##op ALIAS_##op(INTF_##op)
 
-int smp_processor_id(void) {
-    return sched_getcpu();
-}
-
-int num_online_cpus(void) {
-    return sysconf(_SC_NPROCESSORS_ONLN);
-}
-
 OP_DEFINE_SAFE(OPEN, {
     PRINT_FUNC;
     if (*path == '\\' || *path != '/' || path[1] == '\\') {
@@ -548,8 +540,96 @@ extern int hk_fill_super(struct super_block *sb, void *data, int silent);
 extern void hk_put_super(struct super_block *sb);
 extern int hk_show_stats(void);
 
+#define MAX_BACKTRACE 16
+
+void err_handler(int signum) {
+    void *array[MAX_BACKTRACE];
+    size_t size;
+    char **strings;
+    size_t i;
+    char *orig_ld_preload;
+    int ret = 0;
+
+    size = backtrace(array, MAX_BACKTRACE);
+    strings = backtrace_symbols(array, size);
+
+    printf("\n");
+    printf("\n");
+
+    if (signum == SIGSEGV)
+        printf("BUG\n");
+    else if (signum == SIGINT)
+        printf("KILLED by user\n");
+    else
+        printf("UNKNOWN\n");
+
+    printf("RIP: %p\n", __builtin_return_address(0));
+
+    orig_ld_preload = getenv("LD_PRELOAD");
+    assert(orig_ld_preload != NULL);
+    putenv("LD_PRELOAD=");
+
+    for (i = 0; i < size; i++) {
+        char syscom[512] = {0}, exe[128] = {0}, ofs[128] = {0};
+        char *p = strings[i], *q = exe, *r = ofs;
+        while (*p != '(')
+            *q++ = *p++;
+        *q = '\0';
+        p++;
+        while (*p != '+')
+            p++;
+        while (*p != ')')
+            *r++ = *p++;
+        *r = '\0';
+
+        sprintf(syscom, "addr2line -i -a -f -p --exe=%s %s 2>/dev/null", exe,
+                ofs);
+        ret = system(syscom);
+        if (ret != 0) {
+            pr_info("Failed to execute addr2line\n");
+        }
+    }
+    putenv(orig_ld_preload);
+
+    exit(1);
+}
+
+#define MAX_PROG_NAME 128
+
+static inline int get_prog_name(char *prog) {
+    pid_t pid = getpid();
+    size_t ret;
+    sprintf(prog, "/proc/%d/cmdline", pid);
+    FILE *fp = fopen(prog, "r");
+
+    if (fp == NULL) {
+        pr_info("Failed to open %s\n", prog);
+        return -EINVAL;
+    }
+
+    ret = fread(prog, 1, MAX_PROG_NAME, fp);
+    if (ret == 0) {
+        pr_info("Failed to read %s\n", prog);
+        return -EINVAL;
+    }
+    fclose(fp);
+    return 0;
+}
+
 static int inited = 0;
 static __attribute__((constructor(101))) void killer_init(void) {
+    char prog[MAX_PROG_NAME] = {0};
+    assert(!get_prog_name(prog));
+
+#ifdef DEBUG
+    char *target = getenv("TARGET_TEST_PROG");
+    assert(target != NULL);
+    if (strcmp(prog, target) != 0) {
+        pr_info("Not the target program, skip\n");
+        return;
+    }
+#endif
+
     if (real_ops.ERROR == 0) {
         insert_real_op();
         inited = 1;
@@ -559,16 +639,36 @@ static __attribute__((constructor(101))) void killer_init(void) {
     pr_info("Installing real syscalls...\n");
     pr_info("Real syscall installed. Initializing KILLER...\n");
 
+    signal(SIGSEGV, err_handler);
+    signal(SIGINT, err_handler);
+
     if (real_ops.ERROR != 0) {
+        pr_info("Checking I/O engine...\n");
+        assert(!io_test());
+        pr_info("I/O engine is ready.\n");
+
         hk_fill_super(&sb, NULL, 0);
         pr_info("KILLER initialized in CPU %d.\n", smp_processor_id());
-        pr_info("Now the program begins.\n");
+        pr_info("Now the program [%s] begins.\n", prog);
         return;
     }
     pr_info("Failed to init\n");
 }
 
 static __attribute__((destructor)) void killer_destroy(void) {
+    char prog[MAX_PROG_NAME] = {0};
+    assert(!get_prog_name(prog));
+
+#ifdef DEBUG
+    char *target = getenv("TARGET_TEST_PROG");
+    assert(target != NULL);
+    if (strcmp(prog, target) != 0) {
+        pr_info("Current: %s, Target: %s. Not the target program, skip\n", prog,
+                target);
+        return;
+    }
+#endif
+
     if (measure_timing)
         hk_show_stats();
     hk_put_super(&sb);

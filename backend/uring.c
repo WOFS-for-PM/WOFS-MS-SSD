@@ -8,6 +8,14 @@
 
 #include "common.h"
 
+/*
+ * Debug code
+ */
+#ifdef pr_fmt
+#undef pr_fmt
+#define pr_fmt(fmt) "[URING]: " fmt
+#endif
+
 #define read_barrier() __asm__ __volatile__("" ::: "memory")
 #define write_barrier() __asm__ __volatile__("" ::: "memory")
 
@@ -123,6 +131,7 @@ static int __ioring_queue_init(struct ioring_data *ld, int sqpoll_cpu) {
 
     memset(&p, 0, sizeof(p));
 
+    // TODO: Why this blocks my program?
     p.flags |= IORING_SETUP_IOPOLL;
     p.flags |= IORING_SETUP_SQPOLL;
     if (sqpoll_cpu >= 0) {
@@ -200,7 +209,7 @@ static int ioring_init(struct thread_data *td) {
         iovec->iov_base = td->buf + i * td->bs;
         iovec->iov_len = td->bs;
 
-        // printf("iovec %d: %p, %lu\n", i, iovec->iov_base, iovec->iov_len);
+        // pr_info("iovec %d: %p, %lu\n", i, iovec->iov_base, iovec->iov_len);
     }
 
     err = __ioring_queue_init(ld, sqpoll_cpu);
@@ -287,13 +296,15 @@ static enum q_status ioring_queue(struct thread_data *td, struct io_u *io_u) {
     if (next_tail == *ring->head)
         return Q_BUSY;
 
-    // printf("%s: sqe->fd = %d, sqe->opcode = %d, sqe->addr = %p, sqe->len = "
-    //        "%lu, sqe->buf_index = %lu, ring_index = %lu\n",
-    //        __func__, sqe->fd, sqe->opcode, (void *)sqe->addr, sqe->len,
-    //        sqe->buf_index, tail & ld->sq_ring_mask);
+#ifdef DEBUG
+    struct io_uring_sqe *sqe = &ld->sqes[sqe_idx];
+    pr_debug("%s: sqe->fd = %d, sqe->opcode = %d, sqe->addr = %p, sqe->len = "
+             "%u, sqe->buf_index = %u, ring_index = %u\n",
+             __func__, sqe->fd, sqe->opcode, (void *)sqe->addr, sqe->len,
+             sqe->buf_index, tail & ld->sq_ring_mask);
+#endif
 
     /* ensure sqe stores are ordered with tail update */
-    write_barrier();
     ring->array[tail & ld->sq_ring_mask] = sqe_idx;
     *ring->tail = next_tail;
     write_barrier();
@@ -313,13 +324,16 @@ static int ioring_commit(struct thread_data *td) {
     struct io_sq_ring *ring = &ld->sq_ring;
     int ret, commit = 0;
 
-    if (ld->queued == 0)
+    if (ld->queued == 0) {
         return 0;
+    }
+
+    commit = ld->queued;
 
     read_barrier();
     if (*ring->flags & IORING_SQ_NEED_WAKEUP) {
+        assert(ld->queued == 1);
         ret = __io_uring_enter(ld, ld->queued, 0, IORING_ENTER_SQ_WAKEUP);
-        commit = ld->queued;
         if (ret < 0) {
             BUG_ON(1);
             return ret;
@@ -361,6 +375,9 @@ static struct io_u *ioring_event(struct thread_data *td, int event) {
     cqe = &ld->cq_ring.cqes[index];
     io_u = (struct io_u *)cqe->user_data;
 
+    pr_debug("res: %d, io_u->opcode: %d, io_u->idx: %d\n", cqe->res,
+             io_u->opcode, io_u->idx);
+
     return io_u;
 }
 
@@ -370,12 +387,15 @@ static int ioring_getevents(struct thread_data *td, unsigned int min,
     struct io_cq_ring *ring = &ld->cq_ring;
     unsigned long tries = 0, retries = 0;
     unsigned events = 0;
-    struct io_u *io_u;
-    int r, ret, i;
+    int r, ret;
+    IO_INIT_TIMING(time);
 
-    if (ld->queued == 0)
+    if (!ring->head)
         return 0;
 
+    IO_START_TIMING(uring_get_events_t, time);
+
+    assert(ring->head);
     ld->cq_ring_off = *ring->head;
 
 retry:
@@ -385,29 +405,26 @@ retry:
         r = __ioring_cqring_reap(td, events, max);
         if (r) {
             events += r;
-            for (i = 0; i < r; i++) {
-                io_u = ioring_event(td, i);
-                mark_io_u_complete(td, io_u);
-            }
-            if (min != 0)
-                min -= r;
-            continue;
         }
         tries++;
     } while (events < min && tries < GET_EVENTS_MAX_TRIES(td));
 
     if (events < min) {
         // NOTE: Go to kernel and force it to complete the requests
-        ret = __io_uring_enter(ld, 0, min - events, IORING_ENTER_GETEVENTS);
-        if (ret < 0) {
-            BUG_ON(1);
-            return ret;
+        struct io_sq_ring *sring = &ld->sq_ring;
+        read_barrier();
+        if (*sring->flags & IORING_SQ_NEED_WAKEUP) {
+            ret = __io_uring_enter(ld, 0, min - events, IORING_ENTER_GETEVENTS);
+            if (ret < 0) {
+                BUG_ON(1);
+                return ret;
+            }
         }
         retries++;
         goto retry;
     }
-
-    return r < 0 ? r : events;
+    IO_END_TIMING(uring_get_events_t, time);
+    return events;
 }
 
 static void ioring_cleanup(struct thread_data *td) {
@@ -422,23 +439,15 @@ static void ioring_cleanup(struct thread_data *td) {
     }
 }
 
-static bool ioring_ack(struct thread_data *td, struct io_u *io_u) {
-    if (io_u->opcode != IO_READ) {
-        return true;
-    } else {
-        return false;
-    }
-}
-
 static int ioring_test(void) {
     struct thread_data td;
     int write_iovec_idx = 0;
     int read_iovec_idx = 1;
     int ofs = 0;
-    int sqpoll_cpu = -1;
+    int sqpoll_cpu = 1;
     struct io_u *io_u;
 
-    printf("%s called!\n", __func__);
+    pr_info("%s called!\n", __func__);
 
     assert(!thread_data_init(&td, 32, 4096, "/dev/nvme0n1p1", &sqpoll_cpu));
     assert(!ioring_init(&td));
@@ -464,7 +473,7 @@ static int ioring_test(void) {
     int events = ioring_getevents(&td, 1, 1);
     for (int i = 0; i < events; i++) {
         io_u = ioring_event(&td, i);
-        printf("sqe at %d finished\n", io_u->idx);
+        pr_info("sqe at %d finished\n", io_u->idx);
     }
 
     memset(td.buf, 0, 5);
@@ -475,11 +484,11 @@ static int ioring_test(void) {
     events = ioring_getevents(&td, 1, 1);
     for (int i = 0; i < events; i++) {
         io_u = ioring_event(&td, i);
-        printf("sqe at %d finished\n", io_u->idx);
+        pr_info("sqe at %d finished\n", io_u->idx);
     }
     char buf[5] = {0};
     memcpy(buf, td.buf + read_iovec_idx * 4096, 4);
-    printf("buf: %s\n", buf);
+    pr_info("buf: %s\n", buf);
     BUG_ON(strcmp(buf, "STAR") != 0);
 
     ioring_cleanup(&td);
@@ -496,7 +505,6 @@ struct ioengine_ops uring_io_ops = {
     .commit = ioring_commit,
     .getevents = ioring_getevents,
     .event = ioring_event,
-    .ack = ioring_ack,
     .unit_test = ioring_test,
 };
 EXPORT_SYMBOL(uring_io_ops);

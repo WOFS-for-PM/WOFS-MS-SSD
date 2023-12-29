@@ -8,6 +8,10 @@
 #include "../porting.h"
 #endif
 
+#ifndef CONFIG_64BIT
+#define CONFIG_64BIT
+#endif
+
 #ifdef CONFIG_64BIT
 #define BITS_PER_LONG 64
 #else
