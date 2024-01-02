@@ -39,11 +39,6 @@ struct io_u {
     int flags;
 };
 
-typedef struct io_ud {
-    off_t offset;
-    size_t len;
-} io_ud_t;
-
 struct thread_data {
     int cpuid;
 
@@ -96,12 +91,12 @@ int io_unregister(void);
 
 int io_open(struct thread_data *td, const char *e);
 int io_close(struct thread_data *td);
-io_ud_t *io_write(struct thread_data *td, off_t offset, char *buf, size_t len,
+int io_write(struct thread_data *td, off_t offset, char *buf, size_t len,
                   int flags);
-io_ud_t *io_read(struct thread_data *td, off_t offset, char *buf, size_t len,
+int io_read(struct thread_data *td, off_t offset, char *buf, size_t len,
                  int flags);
-int io_sync(struct thread_data *td);
-int io_drop(struct thread_data *td, io_ud_t *io_ud);
+int io_fence(struct thread_data *td);
+int io_flush(struct thread_data *td, off_t offset, size_t len);
 int io_test(void);
 
 #endif

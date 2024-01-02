@@ -7,8 +7,6 @@ int measure_timing;
 int wprotect;
 int support_clwb;
 
-#define DEV_HANDLER_PTR(sbi) &((sbi)->fast_dev.td)
-
 static inline void set_default_opts(struct hk_sb_info *sbi) {
     set_opt(sbi->s_mount_opt, ERRORS_CONT);
     sbi->cpus = num_online_cpus();
@@ -46,6 +44,7 @@ int hk_fill_super(struct super_block *sb, void *data, int silent) {
 
     sb->s_fs_info = sbi;
     sbi->sb = sb;
+    sbi->magic = KILLER_SUPER_MAGIC;
 
     if (sbi->cpus > POSSIBLE_MAX_CPU) {
         hk_warn("killer does't support more than " __stringify(

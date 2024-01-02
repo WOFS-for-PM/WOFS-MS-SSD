@@ -127,7 +127,7 @@ static int __search_working_tree(struct thread_data *td, off_t offset,
 }
 
 static int __remove_working_tree(struct thread_data *td, struct io_u *io_u) {
-    pr_debug("%s: %ld\n", __func__, io_u->offset);
+    pr_debug("%s: io_u->idx %d, (%ld)\n", __func__, io_u->idx, io_u->offset);
 #ifdef DEBUG
     int ret;
     ret = __search_working_tree(td, io_u->offset, &io_u);
@@ -149,17 +149,6 @@ static int __mark_io_u_available(struct thread_data *td, struct io_u *io_u) {
     pr_debug("%s: %d\n", __func__, io_u->idx);
 #endif
     return 0;
-}
-
-static int __try_mark_io_u_available(struct thread_data *td,
-                                     struct io_u *io_u) {
-    if (io_u->flags & O_IO_CACHED) {
-        pr_debug("%s: io_u at buf %d is cached (it is hanged)\n", __func__,
-                 io_u->idx);
-        return 0;
-    }
-    __mark_io_u_available(td, io_u);
-    return 1;
 }
 
 static int __mark_io_u_working(struct thread_data *td, struct io_u *io_u) {
@@ -277,8 +266,8 @@ static inline int __io_reap_data_cleanup(struct io_reap_data *d) {
 static int __io_reap_for_nonread(struct thread_data *td, struct io_u *io_u,
                                  void *data) {
     assert(io_u->opcode != IO_READ);
-    if (__try_mark_io_u_available(td, io_u))
-        __remove_working_tree(td, io_u);
+    __mark_io_u_available(td, io_u);
+    __remove_working_tree(td, io_u);
     return 0;
 }
 
@@ -287,8 +276,8 @@ static int __io_reap_for_get_io_u(struct thread_data *td, struct io_u *io_u,
     struct io_reap_data *d = data;
     struct io_reap_wrapper *w;
 
-    if (__try_mark_io_u_available(td, io_u))
-        __remove_working_tree(td, io_u);
+    __mark_io_u_available(td, io_u);
+    __remove_working_tree(td, io_u);
 
     if (!list_empty(&d->io_us)) {
         w = calloc(1, sizeof(struct io_reap_wrapper));
@@ -313,11 +302,13 @@ static int __io_reap_for_reader(struct thread_data *td, struct io_u *io_u,
     size_t req_offset = d->offset;
     size_t bias = 0, len;
 
-    __try_mark_io_u_available(td, io_u);
+    __mark_io_u_available(td, io_u);
+    __remove_working_tree(td, io_u);
 
     if (io_u->opcode == IO_WRITE) {
         // TODO: Handle this
     }
+
     bias = req_offset - io_u->offset;
     pr_debug("%s: bias %ld\n", __func__, bias);
     if (bias > 0) {
@@ -366,8 +357,8 @@ static int __get_io_u_slow_path(struct thread_data *td, struct io_u **io_u) {
         // Retry
         ret = __get_io_u(td, io_u);
         if (*io_u == NULL) {
-            pr_error("failed to get io_u, there are too many Partial Write "
-                     "in this thread!\n");
+            pr_error("Failed to get io_u, there are too many cached io_u(s)"
+                     "in this thread! Please use io_flush to release them\n");
             BUG_ON(1);
             return -EBUSY;
         }
@@ -543,23 +534,22 @@ int io_close(struct thread_data *td) {
 // NOTE: if this is a partial write which has been flushed to disk,
 //       caller must use a read-after-write method to ensure the data
 //       is consistent.
-io_ud_t *io_write(struct thread_data *td, off_t offset, char *buf, size_t len,
-                  int flags) {
+int io_write(struct thread_data *td, off_t offset, char *buf, size_t len,
+             int flags) {
     struct io_u *io_u = NULL, *exist = NULL;
     int ret = -1;
     unsigned long index;
     unsigned long start_index = offset / td->bs;
     unsigned long end_index = (offset + len - 1) / td->bs;
     size_t per_size, bias;
-    off_t orig_offset = offset;
-    size_t orig_len = len;
+    bool need_queued = true;
 
     index = start_index;
     while (index <= end_index) {
         ret = get_io_u(td, &io_u);
         if (ret) {
             pr_info("get_io_u failed\n");
-            return NULL;
+            return -EBUSY;
         }
 
 #ifdef DEBUG
@@ -584,10 +574,14 @@ io_ud_t *io_write(struct thread_data *td, off_t offset, char *buf, size_t len,
             // NOTE: Please use io_drop to drop the cached io_u
             assert(flags & O_IO_CACHED || flags & O_IO_AUTO);
             __mark_io_u_available(td, io_u);
+            pr_debug("HIT: %d\n", io_u->idx);
+            need_queued = false;
             io_u = exist;
         } else {
+            need_queued = !(flags & O_IO_CACHED);
             if (bias != 0) {
-                pr_warn("Partial write without caching: %ld\n", io_u->offset);
+                pr_warn("Partial write without caching: %ld, %ld\n",
+                        io_u->offset, bias);
             }
         }
         io_u->opcode = IO_WRITE;
@@ -596,7 +590,8 @@ io_ud_t *io_write(struct thread_data *td, off_t offset, char *buf, size_t len,
         // Queue it any way
         // But might not release even the
         // io_u is completed, see flags
-        __io_queue(td, io_u->idx);
+        if (need_queued)
+            __io_queue(td, io_u->idx);
 
         offset += per_size;
         len -= per_size;
@@ -604,28 +599,19 @@ io_ud_t *io_write(struct thread_data *td, off_t offset, char *buf, size_t len,
         index += 1;
     }
 
-    if (flags & O_IO_CACHED) {
-        io_ud_t *io_ud = calloc(1, sizeof(io_ud_t));
-        io_ud->offset = orig_offset;
-        io_ud->len = orig_len;
-        return io_ud;
-    } else {
-        return NULL;
-    }
+    return 0;
 }
 
 // Must wait for all io_u(s) to be completed
 // TODO: support io_u tree here for cache coherency
-io_ud_t *io_read(struct thread_data *td, off_t offset, char *buf, size_t len,
-                 int flags) {
+int io_read(struct thread_data *td, off_t offset, char *buf, size_t len,
+            int flags) {
     struct io_u *io_u = NULL, *exist;
     int ret = -1, r;
     unsigned long index;
     unsigned long start_index = offset / td->bs;
     unsigned long end_index = (offset + len - 1) / td->bs;
     size_t per_size, bias;
-    off_t orig_offset = offset;
-    size_t orig_len = len;
     struct io_read_data data = {
         .buf = buf,
         .len = len,
@@ -642,7 +628,7 @@ io_ud_t *io_read(struct thread_data *td, off_t offset, char *buf, size_t len,
         ret = get_io_u(td, &io_u);
         if (ret) {
             pr_info("get_io_u failed\n");
-            return NULL;
+            return -EBUSY;
         }
 
         bias = offset & (td->bs - 1);
@@ -681,38 +667,61 @@ io_ud_t *io_read(struct thread_data *td, off_t offset, char *buf, size_t len,
     }
     __io_reap_data_cleanup(&d);
 
-    if (flags & O_IO_CACHED) {
-        io_ud_t *io_ud = calloc(1, sizeof(io_ud_t));
-        io_ud->offset = orig_offset;
-        io_ud->len = orig_len;
-        return io_ud;
-    } else {
-        return NULL;
-    }
-}
-
-// Wait for all io_u(s) to be completed
-int io_sync(struct thread_data *td) {
-    int r;
-    pr_warn("%s: in flight: %d, reaping them all\n", __func__, td->inflight);
-    r = __io_reap(td, td->inflight, td->iodepth, __io_reap_for_nonread, NULL);
-    assert(r >= 0);
     return 0;
 }
 
-// Drop the cached io_u(s) based on io_ud
-int io_drop(struct thread_data *td, io_ud_t *io_ud) {
-    size_t len = io_ud->len;
-    off_t cur, offset = round_down(io_ud->offset, td->bs);
+struct io_u_list_wrapper {
+    struct list_head list;
+    struct io_u *io_u;
+};
+
+// Wait for all io_u(s) to be completed
+int io_fence(struct thread_data *td) {
+    struct io_u *io_u, *n;
+    struct io_u_list_wrapper *lw, *lw_n;
+    struct list_head entry_list = LIST_HEAD_INIT(entry_list);
+    int r = 0;
+
+    // pr_warn("%s: in flight: %d, reaping them all\n", __func__, td->inflight);
+
+    // All the (write) I/Os are waited here (similar to a fence operation)
+    r = __io_reap(td, td->inflight, td->iodepth, __io_reap_for_nonread, NULL);
+
+    rbtree_postorder_for_each_entry_safe(io_u, n, &td->working_tree, rb_node) {
+        lw = calloc(1, sizeof(struct io_u_list_wrapper));
+        lw->io_u = io_u;
+        list_add_tail(&lw->list, &entry_list);
+    }
+
+    // Do not invalidate the cached io_u(s) here.
+    list_for_each_entry_safe(lw, lw_n, &entry_list, list) {
+        if (lw->io_u->flags & O_IO_DROP) {
+            __mark_io_u_available(td, lw->io_u);
+            __remove_working_tree(td, lw->io_u);
+        }
+        list_del(&lw->list);
+        free(lw);
+    }
+
+    return r;
+}
+
+// evict the cached io_u(s) based on ret
+int io_flush(struct thread_data *td, off_t offset, size_t len) {
+    off_t cur, aligned_offset = round_down(offset, td->bs);
+    size_t aligned_len = round_up(len, td->bs);
     struct io_u *io_u;
     int r = 0;
 
-    for (cur = offset; cur < offset + len; cur += td->bs) {
+    for (cur = aligned_offset; cur < aligned_offset + aligned_len;
+         cur += td->bs) {
         if (__search_working_tree(td, cur, &io_u)) {
             r++;
-            io_u->flags = 0;
-            __mark_io_u_available(td, io_u);
-            __remove_working_tree(td, io_u);
+            assert(io_u->flags & O_IO_CACHED);
+            io_u->flags = O_IO_DROP;
+            __io_queue(td, io_u->idx);
+            pr_debug("%s: io_u->idx: %d (%ld)\n", __func__, io_u->idx,
+                     io_u->offset);
         }
     }
 
@@ -764,11 +773,11 @@ static int __test;
 // ==================== unit test ====================
 DEFINE_UNIT_TEST(__sync_read_after_write, {
     char buf[6] = {0};
-    io_ud_t *io_ud = NULL;
+    int ret;
 
-    io_ud = io_write(td, 0, "uring", 5, O_IO_DROP);
-    assert(io_ud == NULL);
-    io_sync(td);
+    ret = io_write(td, 0, "uring", 5, O_IO_DROP);
+    assert(!ret);
+    io_fence(td);
     io_read(td, 0, buf, 5, O_IO_DROP);
     pr_info("buf %p: %s\n", buf, buf);
     if (strcmp(buf, "uring") != 0) {
@@ -783,28 +792,31 @@ DEFINE_UNIT_TEST(__sync_bunch_read_after_bunch_write, {
     off_t offset = 0;
     unsigned long loop = 1024 * 1024;
     unsigned long i;
-    io_ud_t *io_ud = NULL;
+    int ret;
 
     memset(buf, 'a', 4096);
 
     IO_BENCH_START("write");
     offset = 0;
     for (i = 0; i < loop; i++) {
-        io_ud = io_write(td, offset, buf, 4096, O_IO_DROP);
-        assert(io_ud == NULL);
+        ret = io_write(td, offset, buf, 4096, O_IO_DROP);
+        assert(!ret);
         offset += 4096;
     }
     IO_BENCH_END("write", loop * 4096);
 
     BENCH_START("sync");
-    io_sync(td);
+    io_fence(td);
     BENCH_END("sync");
+
+    assert(rb_first(&td->working_tree) == NULL);
 
     IO_BENCH_START("read");
     offset = 0;
     for (i = 0; i < loop; i++) {
         memset(buf, 0, 4096);
-        io_read(td, offset, buf, 4096, O_IO_DROP);
+        ret = io_read(td, offset, buf, 4096, O_IO_DROP);
+        assert(!ret);
         for (int j = 0; j < 4096; j++) {
             if (buf[j] != 'a') {
                 pr_warn("Failed to open uring device\n");
@@ -819,11 +831,11 @@ DEFINE_UNIT_TEST(__sync_bunch_read_after_bunch_write, {
 
 DEFINE_UNIT_TEST(__async_raw_and_war, {
     char buf[6] = {0};
-    io_ud_t *io_ud = NULL;
+    int ret = 0;
 
     BENCH_START("raw");
-    io_ud = io_write(td, 0, "uring", 5, O_IO_CACHED);
-    assert(io_ud != NULL);
+    ret = io_write(td, 0, "uring", 5, O_IO_CACHED);
+    assert(!ret);
     io_read(td, 0, buf, 5, O_IO_AUTO);
     pr_info("buf %p: %s\n", buf, buf);
     if (strcmp(buf, "uring") != 0) {
@@ -831,10 +843,10 @@ DEFINE_UNIT_TEST(__async_raw_and_war, {
         BUG_ON(1);
         return -1;
     }
+    // now we drop the cached io_u
+    io_flush(td, 0, 5);
     // wait the write to be completed
-    io_sync(td);
-    // now we can drop the cached io_u
-    io_drop(td, io_ud);
+    io_fence(td);
     assert(__io_u_avai_count(td) == td->iodepth);
     assert(rb_first(&td->working_tree) == NULL);
     BENCH_END("raw");
@@ -843,18 +855,19 @@ DEFINE_UNIT_TEST(__async_raw_and_war, {
 
     BENCH_START("war");
     // should be "uring"
-    io_ud = io_read(td, 0, buf, 5, O_IO_CACHED);
+    ret = io_read(td, 0, buf, 5, O_IO_CACHED);
     assert(td->inflight == 0);
     assert(rb_first(&td->working_tree) != NULL);
-    assert(io_ud != NULL);
+    assert(!ret);
     // modify the buf
     io_write(td, 0, "o", 1, O_IO_AUTO);
-    // wait the read to be completed
-    io_sync(td);
-    io_drop(td, io_ud);
+    // wait the write to be completed in media
+    // since that we gonna drop the cached io_u
+    io_flush(td, 0, 1);
+    io_fence(td);
     assert(__io_u_avai_count(td) == td->iodepth);
-    io_ud = io_read(td, 0, buf, 5, O_IO_DROP);
-    assert(io_ud == NULL);
+    ret = io_read(td, 0, buf, 5, O_IO_DROP);
+    assert(!ret);
     pr_info("buf %p: %s\n", buf, buf);
     if (strcmp(buf, "oring") != 0) {
         pr_warn("Failed to open uring device\n");
@@ -862,6 +875,118 @@ DEFINE_UNIT_TEST(__async_raw_and_war, {
         return -1;
     }
     BENCH_END("war");
+})
+
+DEFINE_UNIT_TEST(__async_small_and_large_write, {
+#define meta_region_start(nr) (meta_regions[nr].start_offset)
+
+#define meta_full(nr, entry_size)          \
+    (meta_regions[nr].start_offset != 0 && \
+     meta_regions[nr].cur_offset ==        \
+         meta_regions[nr].start_offset + meta_regions[nr].cap)
+
+#define alloc_meta_region(nr, cur_offset, rsize, entry_size)                   \
+    ({                                                                         \
+        off_t ret;                                                             \
+        if (meta_regions[nr].start_offset == 0 || meta_full(nr, entry_size)) { \
+            meta_regions[nr].start_offset = cur_offset;                        \
+            meta_regions[nr].cur_offset = cur_offset;                          \
+            meta_regions[nr].cap = rsize;                                      \
+            cur_offset += rsize;                                               \
+        }                                                                      \
+        ret = meta_regions[nr].cur_offset;                                     \
+        meta_regions[nr].cur_offset += entry_size;                             \
+        ret;                                                                   \
+    })
+
+#define alloc_data_block(cur_offset, bsize) \
+    ({                                      \
+        off_t ret;                          \
+        ret = cur_offset;                   \
+        cur_offset += bsize;                \
+        ret;                                \
+    })
+    struct meta_region {
+        off_t start_offset;
+        off_t cur_offset;
+        size_t cap;
+    };
+
+    char block_buf[4096] = {0};
+    char meta_buf[256] = {0};
+    char test_name[256] = {0};
+    unsigned long loop = 1024 * 1024;
+    unsigned long i;
+    off_t cur_offset = 0;
+    off_t block_offset = 0;
+    off_t meta_offset = 0;
+    off_t meta_offset_start = 0;
+    struct meta_region *meta_regions;
+    int ret;
+    int max_nr_meta_regions = 5;
+    int nr_meta_region;
+    unsigned long flush_count = 0;
+    unsigned long fence_count = 0;
+    int entry_size = 256;
+    unsigned long io_gap = 0;
+
+    memset(block_buf, 'a', 4096);
+    memset(meta_buf, 'b', 256);
+
+    for (nr_meta_region = 1; nr_meta_region <= max_nr_meta_regions;
+         nr_meta_region++) {
+        meta_regions = calloc(nr_meta_region, sizeof(struct meta_region));
+        snprintf(test_name, 256, "write w/ %d meta", nr_meta_region);
+
+        IO_BENCH_START(test_name);
+        assert(meta_regions != NULL);
+        flush_count = 0;
+        cur_offset = 0;
+        fence_count = 0;
+        for (i = 0; i < loop; i++) {
+            block_offset = alloc_data_block(cur_offset, 4096);
+
+            pr_debug("block write to [%ld, %ld)\n", block_offset,
+                     block_offset + 4096);
+
+            assert(block_offset >= 0);
+            assert((block_offset & (4096 - 1)) == 0);
+
+            ret = io_write(td, block_offset, block_buf, 4096, O_IO_DROP);
+            assert(!ret);
+
+            for (int nr = 0; nr < nr_meta_region; nr++) {
+                meta_offset =
+                    alloc_meta_region(nr, cur_offset, 4096, entry_size);
+                pr_debug("meta write to [%ld, %ld)\n", meta_offset,
+                         meta_offset + entry_size);
+
+                assert(meta_offset >= 0);
+                ret = io_write(td, meta_offset, meta_buf, entry_size,
+                               O_IO_CACHED);
+                assert(!ret);
+
+                if (meta_full(nr, entry_size)) {
+                    meta_offset_start = meta_region_start(nr);
+                    pr_debug("meta flush to [%ld, %ld)\n", meta_offset_start,
+                             meta_offset_start + 4096);
+                    assert((meta_offset_start & (4096 - 1)) == 0);
+                    // release the cached meta
+                    io_flush(td, meta_offset_start, 4096);
+                    // NOTE: fence will be really slow, and the performance gain
+                    //       from WOFS is not optimizing
+                    // fence_count += io_fence(td);
+                    flush_count++;
+                    cur_offset += io_gap;
+                }
+            }
+        }
+        pr_info("flush_count: %ld, fence_count: %ld\n", flush_count,
+                fence_count);
+        IO_BENCH_END(test_name, loop * 4096);
+        free(meta_regions);
+        io_fence(td);
+    }
 })
 
 int io_test(void) {
@@ -874,7 +999,8 @@ int io_test(void) {
     io_open(&td, "uring");
     // assert(!__sync_read_after_write(&td));
     // assert(!__sync_bunch_read_after_bunch_write(&td));
-    assert(!__async_raw_and_war(&td));
+    // assert(!__async_raw_and_war(&td));
+    assert(!__async_small_and_large_write(&td));
     io_close(&td);
     thread_data_cleanup(&td);
 

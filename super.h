@@ -3,6 +3,8 @@
 
 #include "killer.h"
 
+#define DEV_HANDLER_PTR(sbi) (&((sbi)->fast_dev.td))
+
 // KILLER fast device type
 typedef struct hk_dev { 
     struct thread_data td;
@@ -14,7 +16,8 @@ typedef struct hk_dev {
 struct hk_sb_info {
     struct super_block *sb; /* pointer to VFS super block */
     struct hk_super_block *hk_sb; /* DRAM copy of primary SB (i.e., First SB) */
-
+    unsigned long magic;
+    
     unsigned long num_blocks;
 
     /* Mount options */

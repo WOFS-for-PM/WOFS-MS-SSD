@@ -67,6 +67,7 @@
 #define IO_DEPTH num_online_cpus()
 #endif  // IO_DEPTH
 
+#define KILLER_SUPER_MAGIC 0x4b494c4c
 /*
  * Mount flags
  */

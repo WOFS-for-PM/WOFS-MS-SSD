@@ -375,8 +375,8 @@ static struct io_u *ioring_event(struct thread_data *td, int event) {
     cqe = &ld->cq_ring.cqes[index];
     io_u = (struct io_u *)cqe->user_data;
 
-    pr_debug("res: %d, io_u->opcode: %d, io_u->idx: %d\n", cqe->res,
-             io_u->opcode, io_u->idx);
+    pr_debug("res: %d, io_u->opcode: %d, io_u->idx: %d, io_u->flags: %d\n",
+             cqe->res, io_u->opcode, io_u->idx, io_u->flags);
 
     return io_u;
 }

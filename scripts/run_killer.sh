@@ -3,5 +3,5 @@
 ABS_PATH=$(cd $(dirname $0) && pwd)
 
 # TODO: correct path to your test program
-export TARGET_TEST_PROG="tests/test"
+export TARGET_TEST_PROG="fio"
 LD_PRELOAD=$ABS_PATH/../build/libkiller.so $@

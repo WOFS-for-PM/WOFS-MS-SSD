@@ -534,7 +534,7 @@ OP_DEFINE_SAFE(FCLOSE, {
     }
 })
 
-static struct super_block sb = {.s_fs_info = NULL};
+struct super_block sb = {.s_fs_info = NULL};
 
 extern int hk_fill_super(struct super_block *sb, void *data, int silent);
 extern void hk_put_super(struct super_block *sb);
