@@ -4,6 +4,7 @@
 
 #include "common.h"
 #include "linux/kernel.h"
+#include "tlalloc.h"
 
 #define PREDEFINED_PAGE_SIZE 4096
 #define PREDEFINED_CACHE_LINE_SIZE 64
@@ -63,6 +64,19 @@ static inline int os_page_size(void) {
         size = PREDEFINED_PAGE_SIZE;
 
     return size;
+}
+
+#define POLY 0x82f63b78
+uint32_t crc32c(uint32_t crc, const unsigned char *buf, size_t len) {
+    int k;
+
+    crc = ~crc;
+    while (len--) {
+        crc ^= *buf++;
+        for (k = 0; k < 8; k++)
+            crc = crc & 1 ? (crc >> 1) ^ POLY : crc >> 1;
+    }
+    return ~crc;
 }
 
 // ==================== ioengine helpers ====================
@@ -141,9 +155,7 @@ static int __remove_working_tree(struct thread_data *td, struct io_u *io_u) {
 }
 
 static int __mark_io_u_available(struct thread_data *td, struct io_u *io_u) {
-#ifdef DEBUG
     assert(!!test_bit(io_u->idx, td->avai_bm) == 0);
-#endif
     set_bit(io_u->idx, td->avai_bm);
 #ifdef DEBUG
     pr_debug("%s: %d\n", __func__, io_u->idx);
@@ -266,8 +278,10 @@ static inline int __io_reap_data_cleanup(struct io_reap_data *d) {
 static int __io_reap_for_nonread(struct thread_data *td, struct io_u *io_u,
                                  void *data) {
     assert(io_u->opcode != IO_READ);
-    __mark_io_u_available(td, io_u);
-    __remove_working_tree(td, io_u);
+    if (io_u->flags & O_IO_DROP) {
+        __mark_io_u_available(td, io_u);
+        __remove_working_tree(td, io_u);
+    }
     return 0;
 }
 
@@ -276,8 +290,10 @@ static int __io_reap_for_get_io_u(struct thread_data *td, struct io_u *io_u,
     struct io_reap_data *d = data;
     struct io_reap_wrapper *w;
 
-    __mark_io_u_available(td, io_u);
-    __remove_working_tree(td, io_u);
+    if (io_u->flags & O_IO_DROP) {
+        __mark_io_u_available(td, io_u);
+        __remove_working_tree(td, io_u);
+    }
 
     if (!list_empty(&d->io_us)) {
         w = calloc(1, sizeof(struct io_reap_wrapper));
@@ -302,11 +318,14 @@ static int __io_reap_for_reader(struct thread_data *td, struct io_u *io_u,
     size_t req_offset = d->offset;
     size_t bias = 0, len;
 
-    __mark_io_u_available(td, io_u);
-    __remove_working_tree(td, io_u);
+    if (io_u->flags & O_IO_DROP) {
+        __mark_io_u_available(td, io_u);
+        __remove_working_tree(td, io_u);
+    }
 
     if (io_u->opcode == IO_WRITE) {
         // TODO: Handle this
+        assert(0);
     }
 
     bias = req_offset - io_u->offset;
@@ -706,6 +725,48 @@ int io_fence(struct thread_data *td) {
     return r;
 }
 
+// write back the cached io_u(s) to media without evicting them
+int io_clwb(struct thread_data *td, off_t offset, size_t len) {
+    off_t cur, aligned_offset = round_down(offset, td->bs);
+    size_t aligned_len = round_up(len, td->bs);
+    struct io_u *io_u;
+    int r = 0;
+
+    for (cur = aligned_offset; cur < aligned_offset + aligned_len;
+         cur += td->bs) {
+        if (__search_working_tree(td, cur, &io_u)) {
+            r++;
+            assert(io_u->flags & O_IO_CACHED);
+            __io_queue(td, io_u->idx);
+            pr_debug("%s: io_u->idx: %d (%ld)\n", __func__, io_u->idx,
+                     io_u->offset);
+        }
+    }
+
+    return r;
+}
+
+// invalidate the cached io_u(s) without write back
+int io_wbinvd(struct thread_data *td, off_t offset, size_t len) {
+    off_t cur, aligned_offset = round_down(offset, td->bs);
+    size_t aligned_len = round_up(len, td->bs);
+    struct io_u *io_u;
+    int r = 0;
+
+    for (cur = aligned_offset; cur < aligned_offset + aligned_len;
+         cur += td->bs) {
+        if (__search_working_tree(td, cur, &io_u)) {
+            r++;
+            assert(io_u->flags & O_IO_CACHED);
+            io_u->flags = O_IO_DROP;
+            pr_debug("%s: io_u->idx: %d (%ld)\n", __func__, io_u->idx,
+                     io_u->offset);
+        }
+    }
+
+    return r;
+}
+
 // evict the cached io_u(s) based on ret
 int io_flush(struct thread_data *td, off_t offset, size_t len) {
     off_t cur, aligned_offset = round_down(offset, td->bs);
@@ -731,7 +792,7 @@ int io_flush(struct thread_data *td, off_t offset, size_t len) {
 // ==================== unit test tools ====================
 static int __test;
 #define DEFINE_UNIT_TEST(name, FUNC)                                    \
-    __maybe_unused static int name(struct thread_data *td) {            \
+    __maybe_unused static int name(struct thread_data *td, ...) {       \
         __test++;                                                       \
         pr_milestone("UNIT TEST [%d]: %s\n", __test, __func__);         \
         FUNC;                                                           \
@@ -877,7 +938,7 @@ DEFINE_UNIT_TEST(__async_raw_and_war, {
     BENCH_END("war");
 })
 
-DEFINE_UNIT_TEST(__async_small_and_large_write, {
+DEFINE_UNIT_TEST(__wofs_bench, {
 #define meta_region_start(nr) (meta_regions[nr].start_offset)
 
 #define meta_full(nr, entry_size)          \
@@ -927,11 +988,18 @@ DEFINE_UNIT_TEST(__async_small_and_large_write, {
     int nr_meta_region;
     unsigned long flush_count = 0;
     unsigned long fence_count = 0;
-    int entry_size = 256;
-    unsigned long io_gap = 0;
+    int entry_size = 64;
+    int sync = 1;
+
+    va_list args;
+    va_start(args, td);
+    sync = va_arg(args, int);
+    va_end(args);
+
+    pr_milestone("START WOFS %s BENCH\n", sync == 1 ? "SYNC" : "ASYNC");
 
     memset(block_buf, 'a', 4096);
-    memset(meta_buf, 'b', 256);
+    memset(meta_buf, 'b', entry_size);
 
     for (nr_meta_region = 1; nr_meta_region <= max_nr_meta_regions;
          nr_meta_region++) {
@@ -941,7 +1009,7 @@ DEFINE_UNIT_TEST(__async_small_and_large_write, {
         IO_BENCH_START(test_name);
         assert(meta_regions != NULL);
         flush_count = 0;
-        cur_offset = 0;
+        cur_offset = 4 * 1024 * 1024;
         fence_count = 0;
         for (i = 0; i < loop; i++) {
             block_offset = alloc_data_block(cur_offset, 4096);
@@ -955,29 +1023,48 @@ DEFINE_UNIT_TEST(__async_small_and_large_write, {
             ret = io_write(td, block_offset, block_buf, 4096, O_IO_DROP);
             assert(!ret);
 
+            // Not random
             for (int nr = 0; nr < nr_meta_region; nr++) {
                 meta_offset =
                     alloc_meta_region(nr, cur_offset, 4096, entry_size);
                 pr_debug("meta write to [%ld, %ld)\n", meta_offset,
                          meta_offset + entry_size);
 
+                // make sure the first meta region ordered with data block
+                if (nr == 0) {
+                    // emulate checksum
+                    // Slower calculation here, the faster we can `reap`
+                    // (due to async I/O)
+                    // NOTE: sample some of data content and avoid double
+                    //       fence.
+                    ret = crc32c(~0, (const unsigned char *)meta_buf,
+                                 entry_size * 2);
+                    assert(ret != 0);
+                }
+
                 assert(meta_offset >= 0);
                 ret = io_write(td, meta_offset, meta_buf, entry_size,
                                O_IO_CACHED);
                 assert(!ret);
 
+                if (sync == 1) {
+                    flush_count += io_clwb(td, meta_offset, entry_size);
+                    fence_count += io_fence(td);
+                }
+
                 if (meta_full(nr, entry_size)) {
                     meta_offset_start = meta_region_start(nr);
+
                     pr_debug("meta flush to [%ld, %ld)\n", meta_offset_start,
                              meta_offset_start + 4096);
                     assert((meta_offset_start & (4096 - 1)) == 0);
-                    // release the cached meta
-                    io_flush(td, meta_offset_start, 4096);
-                    // NOTE: fence will be really slow, and the performance gain
-                    //       from WOFS is not optimizing
-                    // fence_count += io_fence(td);
-                    flush_count++;
-                    cur_offset += io_gap;
+
+                    if (sync == 1) {  // sync
+                        io_wbinvd(td, meta_offset_start, 4096);
+                    } else {  // async
+                        io_flush(td, meta_offset_start, 4096);
+                        io_fence(td);
+                    }
                 }
             }
         }
@@ -1000,7 +1087,8 @@ int io_test(void) {
     // assert(!__sync_read_after_write(&td));
     // assert(!__sync_bunch_read_after_bunch_write(&td));
     // assert(!__async_raw_and_war(&td));
-    assert(!__async_small_and_large_write(&td));
+    assert(!__wofs_bench(&td, 1));  // sync
+    assert(!__wofs_bench(&td, 0));  // async
     io_close(&td);
     thread_data_cleanup(&td);
 

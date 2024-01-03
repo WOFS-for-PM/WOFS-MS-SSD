@@ -13,9 +13,10 @@
 #define QUEUE_MAX_TRIES(td) ((td)->iodepth)
 #endif
 
-#define IO_READ 0
-#define IO_WRITE 1
-#define IO_SYNC 2
+#define IO_READ 0x1
+#define IO_WRITE 0x2
+#define IO_SYNC 0x4
+#define IO_OP_MASK 0x7
 
 #define O_IO_CACHED 0x1
 #define O_IO_DROP 0x2
@@ -92,10 +93,12 @@ int io_unregister(void);
 int io_open(struct thread_data *td, const char *e);
 int io_close(struct thread_data *td);
 int io_write(struct thread_data *td, off_t offset, char *buf, size_t len,
-                  int flags);
+             int flags);
 int io_read(struct thread_data *td, off_t offset, char *buf, size_t len,
-                 int flags);
+            int flags);
 int io_fence(struct thread_data *td);
+int io_clwb(struct thread_data *td, off_t offset, size_t len);
+int io_wbinvd(struct thread_data *td, off_t offset, size_t len);
 int io_flush(struct thread_data *td, off_t offset, size_t len);
 int io_test(void);
 

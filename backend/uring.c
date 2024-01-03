@@ -231,7 +231,7 @@ static int ioring_prep(struct thread_data *td, struct io_u *io_u) {
     sqe = &ld->sqes[sqe_idx];
     memset(sqe, 0, sizeof(*sqe));
 
-    switch (io_u->opcode) {
+    switch (io_u->opcode & IO_OP_MASK) {
         case IO_READ:
             ioring_op_code = IORING_OP_READ_FIXED;
             break;
