@@ -16,6 +16,7 @@
 struct kmem_cache {
     char name[64];
     size_t size;
+    void (*ctor)(void *);
 };
 
 extern struct kmem_cache *kmem_cache_create(const char *name, size_t size,
@@ -25,6 +26,7 @@ extern struct kmem_cache *kmem_cache_create(const char *name, size_t size,
 extern void kmem_cache_destroy(struct kmem_cache *s);
 
 extern void *kmem_cache_alloc(struct kmem_cache *cachep, gfp_t flags);
+extern void *kmem_cache_zalloc(struct kmem_cache *cachep, gfp_t flags);
 
 extern void kmem_cache_free(struct kmem_cache *cachep, void *objp);
 
@@ -38,7 +40,7 @@ extern void kfree(const void *objp);
 #define kvfree kfree
 
 extern void *krealloc(void *p, size_t newsize, gfp_t flags);
-
+extern void *kcalloc(size_t n, size_t size, gfp_t flags);
 extern void *kvcalloc(size_t n, size_t size, gfp_t flags);
 #else
 #include <stdio.h>

@@ -3,6 +3,28 @@
 
 #include "killer.h"
 
+typedef struct inode_mgr {
+    struct hk_sb_info *sbi; /* the superblock */
+    spinlock_t *ilist_locks;
+    struct list_head *ilists;
+    bool *ilist_init;
+} inode_mgr_t;
+
+struct hk_inode_info {
+    struct hk_inode_info_header *header;
+    struct inode vfs_inode;
+    int layout_type;
+};
+
+static inline struct hk_inode_info *HK_I(struct inode *inode) {
+    return container_of(inode, struct hk_inode_info, vfs_inode);
+}
+
+static inline struct hk_inode_info_header *HK_IH(struct inode *inode) {
+    struct hk_inode_info *si = HK_I(inode);
+    return si->header;
+}
+
 /*
  * hk-specific inode state kept in DRAM
  */
@@ -26,8 +48,8 @@ struct hk_inode_info_header {
     u16 i_links_count;
 
     struct {
-        // obj_ref_inode_t *latest_inode;
-        // obj_ref_attr_t *latest_attr;
+        obj_ref_inode_t *latest_inode;
+        obj_ref_attr_t *latest_attr;
         u64 latest_inline_attr;
     } latest_fop;
 };

@@ -193,6 +193,13 @@ static inline s64 atomic64_read(const atomic64_t *v) {
     { (i) }
 
 typedef pthread_spinlock_t spinlock_t;
+typedef pthread_mutex_t mutex_t;
+
+#define mutex_init(mutex) pthread_mutex_init((mutex), NULL)
+#define mutex_lock(mutex) pthread_mutex_lock((mutex))
+#define mutex_unlock(mutex) pthread_mutex_unlock((mutex))
+#define mutex_trylock(mutex) pthread_mutex_trylock((mutex))
+
 #define spin_lock_init(lock) pthread_spin_init((lock), PTHREAD_PROCESS_PRIVATE)
 #define spin_lock(lock) pthread_spin_lock((lock))
 #define spin_unlock(lock) pthread_spin_unlock((lock))
@@ -239,6 +246,41 @@ struct super_block {
     void *s_fs_info;
 };
 
+struct super_operations {
+    struct inode *(*alloc_inode)(struct super_block *sb);
+    void (*destroy_inode)(struct inode *);
+    void (*evict_inode)(struct inode *);
+};
+
+typedef unsigned int kuid_t;
+typedef unsigned int kgid_t;
+
+typedef unsigned short umode_t;
+
+struct inode {
+    umode_t i_mode;
+    unsigned short i_opflags;
+    kuid_t i_uid;
+    struct super_block *i_sb;
+    kgid_t i_gid;
+    unsigned int i_flags;
+    dev_t i_rdev;
+    loff_t i_size;
+    struct timespec i_atime;
+    struct timespec i_mtime;
+    struct timespec i_ctime;
+    __u32 i_generation;
+    void *i_private;
+};
+
+static inline void inode_init_once(struct inode *inode) {
+    memset(inode, 0, sizeof(*inode));
+
+    getrawmonotonic(&inode->i_atime);
+    getrawmonotonic(&inode->i_mtime);
+    getrawmonotonic(&inode->i_ctime);
+}
+
 #define schedule() sched_yield()
 
 #define __stringify_1(x...) #x
@@ -252,6 +294,16 @@ struct super_block {
            "DEBUG (%d-%ld %s:%d) " pr_fmt(s) "\033[0m", \
            getpid(), syscall(SYS_gettid), __FILE__, __LINE__, ##args)
 #define pr_error(s, args...) printf("\033[0;31m" s "\033[0m", ##args)
+
+#define GREEN "\033[0;32m"
+#define BLACK "\033[0m"
+#define BOLD "\033[1m"
+
+#define pr_milestone(fmt, ...)         \
+    printf(GREEN BOLD "["              \
+                      "MILESTONE"      \
+                      "]: " fmt BLACK, \
+           ##__VA_ARGS__)
 
 #ifdef DEBUG
 #define pr_debug(s, args...)                            \

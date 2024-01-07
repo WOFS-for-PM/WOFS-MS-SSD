@@ -135,11 +135,15 @@ typedef struct meta_mgr {
     typed_meta_mgr_t tmeta_mgrs[TL_MTA_TYPE_NUM];
 } meta_mgr_t;
 
+#define TL_ALLOC_IPU 0x1  // in place update
+#define TL_ALLOC_OPU 0x2  // out of place update
+
 typedef struct tl_allocator {
     data_mgr_t data_manager;
     meta_mgr_t meta_manager;
     struct range_node rng;
     int cpuid;
+    u8 mode;
 } tl_allocator_t;
 
 typedef struct tlalloc_param {

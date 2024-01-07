@@ -264,6 +264,7 @@ typedef __u64 u64;
 #define SLAB_PANIC 0x00040000UL /* Panic if kmem_cache_create() fails */
 
 #define SLAB_RECLAIM_ACCOUNT 0x00020000UL /* Objects are reclaimable */
+#define SLAB_MEM_SPREAD 0x00080000UL      /* Spread some memory over cpuset */
 
 //
 

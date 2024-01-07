@@ -60,7 +60,6 @@ perf-test: libkiller.so
 	sudo bash scripts/run_killer.sh fio -filename=\a -fallocate=none -direct=0 -iodepth 1 -rw=write -ioengine=sync -bs=4K -size=10G -name=write
 	@echo "\033[32m\033[1m===== Done =====\n\033[0m"
 
-
 fio-strace:
 	mkdir -p trace
 	sudo rm -f ./trace/output-golden ./trace/output-killer ./trace/test-golden ./trace/test-killer

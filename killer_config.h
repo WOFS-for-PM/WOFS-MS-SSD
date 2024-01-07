@@ -67,7 +67,11 @@
 #define IO_DEPTH num_online_cpus()
 #endif  // IO_DEPTH
 
-#define KILLER_SUPER_MAGIC 0x4b494c4c
+#define KILLER_SUPER_BLKS 2
+
+#define KILLER_SUPER_MAGIC 0x4b494c4c  // "KILL" in ascii
+#define KILLER_OBJ_MAGIC 0x4b4f424a    // "KOBJ" in ascii
+
 /*
  * Mount flags
  */
@@ -90,8 +94,6 @@
  */
 #define HK_BLK_SZ_BITS 12
 #define HK_BLK_SZ (1 << HK_BLK_SZ_BITS)
-#define HK_PBLK_SZ(sbi) sbi->pblk_sz
-#define HK_LBLK_SZ(sbi) sbi->lblk_sz /* logic block size */
 #define HK_NUM_INO (1024 * 1024)
 #define HK_RG_SLOTS (1024 * 1024)
 #define HK_RG_ENTY_SLOTS (4)
@@ -111,5 +113,9 @@
 #define HK_PERCORE_JSLOTS (1) /* per core journal slots */
 #define HK_READAHEAD_WINDOW (16 * 1024)
 #define HK_RESCUE_WORKERS 8 /* for failure recovery */
+
+#define CACHELINE_SIZE (64)
+#define CACHELINE_MASK (~(CACHELINE_SIZE - 1))
+#define CACHELINE_ALIGN(addr) (((addr) + CACHELINE_SIZE - 1) & CACHELINE_MASK)
 
 #endif

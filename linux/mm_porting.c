@@ -20,9 +20,13 @@ struct kmem_cache *kmem_cache_create(const char *name, size_t size,
                                      size_t align, unsigned long flags,
                                      void (*ctor)(void *)) {
     struct kmem_cache *p = __malloc__(sizeof(struct kmem_cache));
+    if (!p) {
+        return NULL;
+    }
 
     strcpy(p->name, name);
     p->size = size;
+    p->ctor = ctor;
 
     return p;
 }
@@ -36,8 +40,23 @@ void *kmem_cache_alloc(struct kmem_cache *cachep, gfp_t flags) {
     if (!cachep) {
         return NULL;
     }
+    void *p = __malloc__(cachep->size);
 
-    return __malloc__(cachep->size);
+    if (p) {
+        if (cachep->ctor) {
+            cachep->ctor(p);
+        }
+    }
+
+    return p;
+}
+
+void *kmem_cache_zalloc(struct kmem_cache *cachep, gfp_t flags) {
+    void *p = kmem_cache_alloc(cachep, flags);
+    if (p) {
+        memset(p, 0, cachep->size);
+    }
+    return p;
 }
 
 void kmem_cache_free(struct kmem_cache *cachep, void *objp) {
@@ -64,6 +83,14 @@ void kfree(const void *objp) {
 
 void *krealloc(void *p, size_t newsize, gfp_t flags) {
     return realloc(p, newsize);
+}
+
+void *kcalloc(size_t n, size_t size, gfp_t flags) {
+    void *p = __malloc__(n * size);
+    if (p) {
+        memset(p, 0, n * size);
+    }
+    return p;
 }
 
 void *kvcalloc(size_t n, size_t size, gfp_t flags) {

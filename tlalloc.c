@@ -18,7 +18,7 @@
  * You should have received a copy of the GNU General Public License
  * along with hunter-userspace.  If not, see <http://www.gnu.org/licenses/>.
  */
-#include "tlalloc.h"
+#include "killer.h"
 
 #define UINT8_SHIFT 3
 #define UINT8_MASK 0x07
@@ -253,7 +253,7 @@ u8 bm_test(u8 *bm, u32 i) {
 }
 
 tl_node_t *tl_create_node(void) {
-    tl_node_t *node = kmalloc(sizeof(tl_node_t), GFP_KERNEL);
+    tl_node_t *node = hk_alloc_tl_node();
     node->blk = 0;
     node->node.rb_left = NULL;
     node->node.rb_right = NULL;

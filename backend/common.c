@@ -20,12 +20,6 @@
 #define pr_fmt(fmt) GREEN BOLD "[IOCOMMON]: " BLACK fmt
 #endif
 
-#define pr_milestone(fmt, ...)         \
-    printf(GREEN BOLD "["              \
-                      "MILESTONE"      \
-                      "]: " fmt BLACK, \
-           ##__VA_ARGS__)
-
 int io_measure_timing = 1;
 // ==================== utils ====================
 static inline int arch_cache_line_size(void) {
@@ -791,13 +785,13 @@ int io_flush(struct thread_data *td, off_t offset, size_t len) {
 
 // ==================== unit test tools ====================
 static int __test;
-#define DEFINE_UNIT_TEST(name, FUNC)                                    \
-    __maybe_unused static int name(struct thread_data *td, ...) {       \
-        __test++;                                                       \
-        pr_milestone("UNIT TEST [%d]: %s\n", __test, __func__);         \
-        FUNC;                                                           \
-        pr_milestone("UNIT TEST [%d]: %s Success\n", __test, __func__); \
-        return 0;                                                       \
+#define DEFINE_UNIT_TEST(name, FUNC)                                       \
+    __maybe_unused static int name(struct thread_data *td, ...) {          \
+        __test++;                                                          \
+        pr_milestone("IO UNIT TEST [%d]: %s\n", __test, __func__);         \
+        FUNC;                                                              \
+        pr_milestone("IO UNIT TEST [%d]: %s Success\n", __test, __func__); \
+        return 0;                                                          \
     }
 
 #define BENCH_START(name)           \

@@ -48,8 +48,8 @@
 
 #include "killer.h"
 
-/* ==== in-media structures ==== */
-struct pm_space_bm_hdr {
+/* ==== in-persistent storage (PS) structures ==== */
+struct ps_space_bm_hdr {
     u16 type;
     u32 blks;
 } __attribute__((__packed__));
@@ -203,7 +203,7 @@ static_assert(sizeof(struct hk_obj_data) == 64);
 /* ==== in-DRAM structures ==== */
 
 typedef struct obj_ref_hdr {
-    u64 addr; /* in-pm addr, offset */
+    u64 addr; /* in-ps addr, offset */
     u32 ref;  /* reference count of obj */
     u32 ino;  /* which file this obj belongs to */
 } obj_ref_hdr_t;
@@ -215,9 +215,9 @@ typedef struct obj_ref_hdr {
 #define DATA_IS_REF(type) ((type) == DATA_REF)
 
 typedef struct obj_ref_data {
-    obj_ref_hdr_t hdr; /* in-pm entry hdr */
+    obj_ref_hdr_t hdr; /* in-ps entry hdr */
     struct list_head node;
-    u64 data_offset; /* in-pm data offset */
+    u64 data_offset; /* in-ps data offset */
     u64 ofs;         /* In-File offset */
     u32 num;         /* Number of blocks */
     u8 type;
@@ -244,7 +244,7 @@ typedef struct obj_ref_inode { /* __INODE_MANAGE_THIS */
 typedef struct obj_ref_attr { /* __INODE_MANAGE_THIS */
     obj_ref_hdr_t hdr;
     u16 from_pkg;
-    u64 dep_ofs; /* in pm dependent inode offset */
+    u64 dep_ofs; /* in ps dependent inode offset */
 } obj_ref_attr_t;
 
 typedef struct d_obj_ref_list {
@@ -306,7 +306,7 @@ typedef struct obj_mgr {
 } obj_mgr_t;
 
 typedef struct attr_update {
-    u64 addr;    /* In-PM attr offset */
+    u64 addr;    /* In-ps attr offset */
     u64 dep_ofs; /* If from_pkg is UNLINK, then dep_ofs points the CREATE pkg */
     u32 i_uid;   /* Owner Uid */
     u32 i_gid;   /* Group Id */
@@ -326,8 +326,8 @@ typedef struct attr_update {
 typedef struct data_update {
     bool build_from_exist;
     void *exist_ref;
-    u64 addr;     /* In-PM data pkg offset */
-    u32 blk;      /* In-PM blk */
+    u64 addr;     /* In-ps data pkg offset */
+    u32 blk;      /* In-ps blk */
     u64 ofs;      /* In-File offset */
     u32 num;      /* Number of blocks */
     u32 i_cmtime; /* for both mtime and ctime */
@@ -335,7 +335,7 @@ typedef struct data_update {
 } data_update_t;
 
 typedef struct inode_update {
-    u64 addr; /* In-PM inode offset */
+    u64 addr; /* In-ps inode offset */
     union {
         unsigned long ino;
         struct hk_inode_info_header *sih;
@@ -348,7 +348,7 @@ typedef struct in_pkg_param {
     /* if the package belongs to an larger package, then pass these arguments */
     u16 bin_type;
     u64 next_pkg_addr;
-    u64 cur_pkg_addr; /* in-pm addr (not offset) */
+    u64 cur_pkg_addr; /* in-ps addr (not offset) */
     void *private;
 } in_pkg_param_t;
 
@@ -374,19 +374,19 @@ typedef struct out_create_pkg_param {
     obj_ref_dentry_t *ref;
 } out_create_pkg_param_t;
 
-#define MTA_PKG_DATA_BLK (OBJ_DATA_SIZE >> HUNTER_MTA_SHIFT)
-#define MTA_PKG_ATTR_BLK (OBJ_ATTR_SIZE >> HUNTER_MTA_SHIFT)
+#define MTA_PKG_DATA_BLK (OBJ_DATA_SIZE >> KILLER_MTA_SHIFT)
+#define MTA_PKG_ATTR_BLK (OBJ_ATTR_SIZE >> KILLER_MTA_SHIFT)
 #define MTA_PKG_CREATE_BLK \
-    ((OBJ_INODE_SIZE + OBJ_DENTRY_SIZE + OBJ_PKGHDR_SIZE) >> HUNTER_MTA_SHIFT)
-#define MTA_PKG_UNLINK_BLK ((OBJ_PKGHDR_SIZE) >> HUNTER_MTA_SHIFT)
+    ((OBJ_INODE_SIZE + OBJ_DENTRY_SIZE + OBJ_PKGHDR_SIZE) >> KILLER_MTA_SHIFT)
+#define MTA_PKG_UNLINK_BLK ((OBJ_PKGHDR_SIZE) >> KILLER_MTA_SHIFT)
 
-#define MTA_PKG_DATA_SIZE (MTA_PKG_DATA_BLK << HUNTER_MTA_SHIFT)
-#define MTA_PKG_ATTR_SIZE (MTA_PKG_ATTR_BLK << HUNTER_MTA_SHIFT)
-#define MTA_PKG_CREATE_SIZE (MTA_PKG_CREATE_BLK << HUNTER_MTA_SHIFT)
-#define MTA_PKG_UNLINK_SIZE (MTA_PKG_UNLINK_BLK << HUNTER_MTA_SHIFT)
+#define MTA_PKG_DATA_SIZE (MTA_PKG_DATA_BLK << KILLER_MTA_SHIFT)
+#define MTA_PKG_ATTR_SIZE (MTA_PKG_ATTR_BLK << KILLER_MTA_SHIFT)
+#define MTA_PKG_CREATE_SIZE (MTA_PKG_CREATE_BLK << KILLER_MTA_SHIFT)
+#define MTA_PKG_UNLINK_SIZE (MTA_PKG_UNLINK_BLK << KILLER_MTA_SHIFT)
 
-#define GET_OFS_INBLK(ofs_addr) ((ofs_addr) & (HUNTER_BLK_SIZE - 1))
-#define GET_ENTRYNR(ofs_addr) (GET_OFS_INBLK(ofs_addr) >> HUNTER_MTA_SHIFT)
+#define GET_OFS_INBLK(ofs_addr) ((ofs_addr) & (KILLER_BLK_SIZE - 1))
+#define GET_ENTRYNR(ofs_addr) (GET_OFS_INBLK(ofs_addr) >> KILLER_MTA_SHIFT)
 
 /* related to pkg update */
 #define UPDATE_SIZE_FOR_APPEND 0
