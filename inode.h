@@ -3,12 +3,12 @@
 
 #include "killer.h"
 
-typedef struct inode_mgr {
+typedef struct hk_inode_mgr {
     struct hk_sb_info *sbi; /* the superblock */
     spinlock_t *ilist_locks;
-    struct list_head *ilists;
+    struct rb_root_cached *ilists;
     bool *ilist_init;
-} inode_mgr_t;
+} hk_inode_mgr_t;
 
 struct hk_inode_info {
     struct hk_inode_info_header *header;

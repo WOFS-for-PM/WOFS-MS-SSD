@@ -41,6 +41,7 @@ static int hk_register_device_info(struct super_block *sb,
 
     sbi->virt_addr = NULL;
     sbi->dax = false;
+    sbi->initsize = 16L * 1024 * 1024 * 1024;
 
     return 0;
 }
@@ -85,30 +86,36 @@ static int hk_features_init(struct hk_sb_info *sbi) {
 
     /* Inode List Related */
     sbi->inode_mgr =
-        (struct inode_mgr *)kmalloc(sizeof(struct inode_mgr), GFP_KERNEL);
+        (struct hk_inode_mgr *)kmalloc(sizeof(struct hk_inode_mgr), GFP_KERNEL);
     if (!sbi->inode_mgr)
         return -ENOMEM;
 
-    // ret = inode_mgr_init(sbi, sbi->inode_mgr);
-    // if (ret < 0)
-    //     return ret;
+    ret = hk_inode_mgr_init(sbi, sbi->inode_mgr);
+    if (ret < 0)
+        return ret;
 
     /* zero out vtail */
     atomic64_set(&sbi->vtail, 0);
     sbi->obj_mgr =
         (struct obj_mgr *)kmalloc(sizeof(struct obj_mgr), GFP_KERNEL);
     if (!sbi->obj_mgr) {
-        // inode_mgr_destroy(sbi->inode_mgr);
+        hk_inode_mgr_destroy(sbi->inode_mgr);
         return -ENOMEM;
     }
     ret = obj_mgr_init(sbi, sbi->cpus, sbi->obj_mgr);
     if (ret) {
-        // inode_mgr_destroy(sbi->inode_mgr);
+        hk_inode_mgr_destroy(sbi->inode_mgr);
         return ret;
     }
 
     // hk_dw_init(&sbi->dw, HK_LINIX_SLOTS);
 
+    return 0;
+}
+
+static int hk_features_exit(struct hk_sb_info *sbi) {
+    obj_mgr_destroy(sbi->obj_mgr);
+    hk_inode_mgr_destroy(sbi->inode_mgr);
     return 0;
 }
 
@@ -156,6 +163,9 @@ void hk_put_super(struct super_block *sb) {
     struct hk_sb_info *sbi = HK_SB(sb);
 
     hk_unregister_device_info(sb, sbi);
+
+    hk_layouts_free(sbi);
+    hk_features_exit(sbi);
 
     kfree(sbi);
 

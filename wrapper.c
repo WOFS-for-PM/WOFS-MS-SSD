@@ -386,7 +386,7 @@ struct super_operations hk_sops = {
     (OPEN)(OPEN64)(OPENAT)(CREAT)(CLOSE)(ACCESS)(SEEK)(TRUNC)(FTRUNC)(LINK)(   \
         UNLINK)(FSYNC)(READ)(WRITE)(PREAD)(PREAD64)(PWRITE)(PWRITE64)(XSTAT)(  \
         XSTAT64)(RENAME)(MKDIR)(RMDIR)(FSTATFS)(FDATASYNC)(FCNTL)(FADVISE)(    \
-        OPENDIR)(CLOSEDIR)(READDIR)(READDIR64)(ERROR)(SYNC_FILE_RANGE)(FOPEN)( \
+        OPENDIR)(CLOSEDIR)(READDIR)(READDIR64)(SYNC_FILE_RANGE)(FOPEN)( \
         FPUTS)(FGETS)(FWRITE)(FREAD)(FCLOSE)(FSEEK)(FFLUSH)
 
 #define PREFIX(call) (real_##call)
@@ -708,7 +708,7 @@ static __attribute__((constructor(101))) void killer_init(void) {
     }
 #endif
 
-    if (real_ops.ERROR == 0) {
+    if (real_ops.OPEN == 0) {
         insert_real_op();
         inited = 1;
     }
@@ -720,7 +720,7 @@ static __attribute__((constructor(101))) void killer_init(void) {
     signal(SIGSEGV, err_handler);
     signal(SIGINT, err_handler);
 
-    if (real_ops.ERROR != 0) {
+    if (real_ops.OPEN != 0) {
         hk_create_slab_caches();
         
         // pr_info("Checking I/O engine...\n");

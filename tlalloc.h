@@ -26,7 +26,10 @@
 
 #define TL_BLK 0x1
 #define TL_MTA 0x2
-#define TL_TYPE_MSK 0x00ff
+#define TL_TYPE_MSK 0x000f
+
+#define TL_ALLOC_HINT_NO_LOCK 0x10
+#define TL_ALLOC_HINT_MSK 0x00f0
 
 /* typedef enum {
     PKG_ATTR,
@@ -37,8 +40,9 @@
     PKG_TYPE_NUM
 } HUNT_PKG_TYPE; */
 
+// [low, high)
 struct range_node {
-    struct list_head node;
+    struct rb_node node;
     /* Block, inode */
     struct {
         unsigned long low;
@@ -46,6 +50,23 @@ struct range_node {
     };
 };
 
+static inline int default_compare(unsigned long a, unsigned long b) {
+    return a < b ? -1 : a > b ? 1 : 0;
+}
+
+int range_insert_node(struct rb_root_cached *tree, struct range_node *new_node,
+                      int (*comparator)(unsigned long, unsigned long));
+int range_find_node(struct rb_root_cached *tree, unsigned long low,
+                    struct range_node **ret_node,
+                    int (*comparator)(unsigned long, unsigned long));
+int range_insert_range(struct rb_root_cached *tree, unsigned long low,
+                       unsigned long high,
+                       int (*comparator)(unsigned long, unsigned long));
+int range_remove_range(struct rb_root_cached *tree, unsigned long low,
+                       unsigned long high,
+                       int (*comparator)(unsigned long, unsigned long));
+unsigned long range_try_pop_N_once(struct rb_root_cached *tree,
+                                   unsigned long *N);
 /* PKG_UNLINK can be split into CREATE + UNLINK; we use linker to link these two
  * package */
 /* corresponding to package in media */
@@ -55,6 +76,21 @@ struct range_node {
 #define TL_MTA_PKG_DATA 0x8000   /* I/O: write operations */
 #define TL_MTA_TYPE_NUM 4
 #define TL_MTA_TYPE_MSK 0xff00
+
+static __always_inline int idx_to_meta_type(int idx) {
+    switch (idx) {
+        case 0:
+            return TL_MTA_PKG_ATTR;
+        case 1:
+            return TL_MTA_PKG_UNLINK;
+        case 2:
+            return TL_MTA_PKG_CREATE;
+        case 3:
+            return TL_MTA_PKG_DATA;
+        default:
+            return -1;
+    }
+}
 
 static __always_inline int meta_type_to_idx(u16 type) {
     switch (type) {
@@ -87,6 +123,8 @@ static __always_inline const char *meta_type_to_str(u16 type) {
 }
 
 #define TL_ALLOC_TYPE(flags) (flags & TL_TYPE_MSK)
+#define TL_ALLOC_HINT(flags) (flags & TL_ALLOC_HINT_MSK)
+
 #define TL_ALLOC_MTA_TYPE(flags) (flags & TL_MTA_TYPE_MSK)
 
 typedef struct tl_dnode {
@@ -96,6 +134,8 @@ typedef struct tl_dnode {
 typedef struct tl_mnode {
     /* metadata is allocated in 64B granularity in a 4KiB block */
     u64 bm;
+    // for OPU update only
+    u8 tail;
 } tl_mnode_t;
 
 typedef struct tl_node {
@@ -121,18 +161,36 @@ typedef struct tl_node {
 typedef struct data_mgr {
     struct rb_root_cached free_tree;
     spinlock_t spin;
+    u64 blk_size;
 } data_mgr_t;
+
+typedef struct victim_node {
+    struct list_head list;
+    tl_node_t *node;
+} victim_node_t;
+
+typedef struct gc_ops {
+    unsigned long (*victim_selection)(void *alloc, struct list_head *,
+                                      struct list_head *, u64, u64 *);
+    int (*migration)(void *alloc, struct list_head *, u8, u64);
+    int (*post_clean)(void *alloc, struct list_head *);
+} gc_ops_t;
 
 typedef struct typed_meta_mgr {
     struct list_head free_list;
+    // For OPU update only
+    struct list_head pend_list;
     DECLARE_HASHTABLE(used_blks, 7);
-    u64 entries_perblk;
-    u64 entries_mask;
     spinlock_t spin;
 } typed_meta_mgr_t;
 
 typedef struct meta_mgr {
     typed_meta_mgr_t tmeta_mgrs[TL_MTA_TYPE_NUM];
+    u64 meta_entries_perblk;
+    u64 meta_entries_mask;
+    gc_ops_t *gc_ops;
+    // granularity of meta block
+    u64 meta_size;
 } meta_mgr_t;
 
 #define TL_ALLOC_IPU 0x1  // in place update
@@ -144,6 +202,7 @@ typedef struct tl_allocator {
     struct range_node rng;
     int cpuid;
     u8 mode;
+    void *private;
 } tl_allocator_t;
 
 typedef struct tlalloc_param {
@@ -193,8 +252,9 @@ void tl_build_alloc_param(tlalloc_param_t *param, u64 req, u16 flags);
 void tl_build_restore_param(tlrestore_param_t *param, u64 blk, u64 num,
                             u16 flags);
 int tl_alloc_init(tl_allocator_t *alloc, int cpuid, u64 blk, u64 num,
-                  u32 blk_size, u32 meta_size);
+                  u32 blk_size, u32 meta_size, u8 mode, gc_ops_t *gc_ops);
 s32 tlalloc(tl_allocator_t *alloc, tlalloc_param_t *param);
+unsigned long tlgc(tl_allocator_t *alloc, unsigned long max);
 void tlfree(tl_allocator_t *alloc, tlfree_param_t *param);
 void tlrestore(tl_allocator_t *alloc, tlrestore_param_t *param);
 void tl_destory(tl_allocator_t *alloc);

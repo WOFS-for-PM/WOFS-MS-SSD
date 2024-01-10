@@ -64,7 +64,7 @@ struct hk_sb_info {
     u64 per_layout_blks; /* aligned blks */
 
     /* 32-bits per-core ino allocator */
-    struct inode_mgr *inode_mgr;
+    struct hk_inode_mgr *inode_mgr;
 
     /* for dynamic workload */
     struct {

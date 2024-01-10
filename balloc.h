@@ -24,3 +24,5 @@ struct hk_layout_prep {
     u64 blks_prepared;
     u64 blks_prep_to_use;
 };
+
+extern gc_ops_t hk_gc_ops;

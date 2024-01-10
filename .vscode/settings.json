@@ -1,3 +1,4 @@
 {
-    "clangd.path": "/usr/bin/clangd-12"
+    "clangd.path": "/usr/bin/clangd-12",
+    "C_Cpp.intelliSenseEngine": "disabled",
 }

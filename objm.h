@@ -203,9 +203,10 @@ static_assert(sizeof(struct hk_obj_data) == 64);
 /* ==== in-DRAM structures ==== */
 
 typedef struct obj_ref_hdr {
-    u64 addr; /* in-ps addr, offset */
-    u32 ref;  /* reference count of obj */
-    u32 ino;  /* which file this obj belongs to */
+    struct hlist_node hnode; /* for reserve index */
+    u64 addr;                /* in-ps addr, offset */
+    u32 ref;                 /* reference count of obj */
+    u32 ino;                 /* which file this obj belongs to */
 } obj_ref_hdr_t;
 
 /* I/O related reference */
@@ -221,20 +222,18 @@ typedef struct obj_ref_data {
     u64 ofs;         /* In-File offset */
     u32 num;         /* Number of blocks */
     u8 type;
-    u32 reserved; /* reserved for future usage  */
 } obj_ref_data_t;
 
-static_assert(sizeof(obj_ref_data_t) <= 64);
+static_assert(sizeof(obj_ref_data_t) <= 72);
 
 typedef struct obj_ref_dentry {
     obj_ref_hdr_t hdr;
-    struct hlist_node hnode;
     struct list_head node;
     u32 target_ino;
     unsigned long hash;
 } obj_ref_dentry_t;
 
-static_assert(sizeof(obj_ref_dentry_t) <= 72);
+static_assert(sizeof(obj_ref_dentry_t) <= 64);
 
 /* File operations related reference */
 typedef struct obj_ref_inode { /* __INODE_MANAGE_THIS */
@@ -255,12 +254,10 @@ typedef struct d_obj_ref_list {
 
 /* use d_root to fast locate objs in the media */
 typedef struct d_root {
-    DECLARE_HASHTABLE(
-        data_obj_refs,
-        HK_HASH_BITS7); /* key is ino, value is the list of data of this ino */
-    DECLARE_HASHTABLE(dentry_obj_refs,
-                      HK_HASH_BITS7); /* key is parent ino, value is the list of
-                                         dentries of this ino */
+    /* key is ino, value is the list of data of this ino */
+    DECLARE_HASHTABLE(data_obj_refs, HK_HASH_BITS7);
+    /* key is parent ino, value is the list of dentries of this ino */
+    DECLARE_HASHTABLE(dentry_obj_refs, HK_HASH_BITS7);
     spinlock_t data_lock;
     spinlock_t dentry_lock;
 } d_root_t;
@@ -270,6 +267,18 @@ typedef struct imap {
     rng_lock_t rng_lock;
     DECLARE_HASHTABLE(map, HK_HASH_BITS7);
 } imap_t;
+
+/* obj2ref_map: key [blk, entrynr] pair, value ref addr */
+struct _obj2ref_map {
+    rng_lock_t rng_lock;
+    DECLARE_HASHTABLE(map, HK_HASH_BITS7);
+};
+
+typedef struct obj2ref_map {
+    struct _obj2ref_map *maps;
+    // equals to the number of split layouts
+    int num_maps;
+} obj2ref_map_t;
 
 typedef struct pendtbl {
     rng_lock_t rng_lock;
@@ -293,16 +302,20 @@ typedef struct claim_req {
 
 /* build this in the mount time */
 typedef struct obj_mgr {
-    struct hk_sb_info *sbi; /* the superblock */
-    d_root_t *d_roots; /* the root of all objs, the number equals to the number
-                          of split layouts */
-    int num_d_roots;   /* the number of d_roots */
-    imap_t prealloc_imap; /* used to fast locate per file objs, key is ino,
-                             value is hk_inode */
-    pendtbl_t
-        pending_table; /* used to handle dependency issues. e.g., to reclaim
-                          UNLINK space, we must pend the request into list until
-                          corresponding CREATE is claimed.   */
+    // the superblock
+    struct hk_sb_info *sbi;
+    // the root of all objs, the number equals to the number of split layouts
+    d_root_t *d_roots;
+    // the number of d_roots
+    int num_d_roots;
+    // used to fast locate per file objs, key is ino, value is hk_inode
+    imap_t prealloc_imap;
+    // used to handle dependency issues. e.g., to reclaim UNLINK space, we must
+    // pend the request into list until corresponding CREATE is claimed.
+    pendtbl_t pending_table;
+    // used to fast locate objs, key is [blk, entrynr] pair, value is ref addr
+    // for GC purpose if this is a non-dax file system (IPU is expensive)
+    obj2ref_map_t obj2ref_map;
 } obj_mgr_t;
 
 typedef struct attr_update {

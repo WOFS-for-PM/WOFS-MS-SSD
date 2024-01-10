@@ -15,6 +15,17 @@ LIB_FILES += $(shell find $(LIB_DIR)/backend -name "*.c")
 
 LIB_OBJS := $(patsubst $(LIB_DIR)/%.c,$(BUILD_DIR)/%.o,$(LIB_FILES))
 
+
+K_FILES := $(shell find $(LIB_DIR) -maxdepth 1 -name "*.c")
+K_OBJS := $(patsubst $(LIB_DIR)/%.c,%.o,$(K_FILES))
+
+# Filters out the user-space files
+K_OBJS := $(filter-out port_test.o, $(K_OBJS))
+K_OBJS := $(filter-out wrapper.o, $(K_OBJS))
+
+obj-m += killer.o
+killer-y := $(K_OBJS)
+
 DEV_PATH := /dev/nvme0n1p1
 
 DEBUG ?= 0
@@ -66,7 +77,15 @@ fio-strace:
 	sudo bash scripts/run_naive_trace.sh fio -filename=./trace/test-golden -fallocate=none -direct=0 -iodepth 1 -rw=write -ioengine=sync -bs=4K -size=128k -name=write -thread
 	sudo bash scripts/run_killer_trace.sh fio -filename=./trace/test-killer -fallocate=none -direct=0 -iodepth 1 -rw=write -ioengine=sync -bs=4K -size=128k -name=write -thread
 
-gdb:
+kmod:
+	# $(MAKE) -C /lib/modules/$(shell uname -r)/build M=`pwd`
+	@echo "Building kernel module..."
+	@echo $(K_OBJS)
+
+kmod-clean:
+	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=`pwd` clean
+
+ugdb:
 	sudo gdb -x scripts/.gdbinit $(shell pwd)/tests/test
 
 clean:

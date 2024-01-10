@@ -69,6 +69,7 @@ extern int wprotect;
 
 #define KILLER_O_ATOMIC 010
 
+#ifndef __KERNEL__
 void print_debug(int fd);
 
 int *hk_errno();
@@ -136,18 +137,21 @@ int hk_lseek(int fd, int offset, int whence);  // ******
 int hk_access(const char *pathname, int mode);  // ******
 
 int hk_fcntl(int fd, int cmd, ...);  // ******
+#endif
 
 /* ======================= ANCHOR: inode.c ========================= */
 // extern const struct address_space_operations hk_aops_dax;
 // void hk_init_inode(struct inode *inode, struct hk_inode *pi);
 // int hk_init_free_inode_list(struct super_block *sb, bool is_init);
 // int hk_init_free_inode_list_percore(struct super_block *sb, int cpuid, bool
-// is_init); int inode_mgr_init(struct hk_sb_info *sbi, inode_mgr_t *mgr); int
-// inode_mgr_alloc(inode_mgr_t *mgr, u32 *ret_ino); int
-// inode_mgr_free(inode_mgr_t *mgr, u32 ino); int inode_mgr_destroy(inode_mgr_t
-// *mgr); int inode_mgr_restore(inode_mgr_t *mgr, u32 ino); struct inode
-// *hk_iget_opened(struct super_block *sb, unsigned long ino); struct inode
-// *hk_iget(struct super_block *sb, unsigned long ino);
+// is_init);
+int hk_inode_mgr_init(struct hk_sb_info *sbi, hk_inode_mgr_t *mgr);
+int hk_inode_mgr_alloc(hk_inode_mgr_t *mgr, u32 *ret_ino);
+int hk_inode_mgr_free(hk_inode_mgr_t *mgr, u32 ino);
+int hk_inode_mgr_destroy(hk_inode_mgr_t *mgr);
+int hk_inode_mgr_restore(hk_inode_mgr_t *mgr, u32 ino);
+// struct inode *hk_iget_opened(struct super_block *sb, unsigned long ino);
+// struct inode *hk_iget(struct super_block *sb, unsigned long ino);
 void *hk_inode_get_slot(struct hk_inode_info_header *sih, u64 offset);
 void hk_init_header(struct super_block *sb, struct hk_inode_info_header *sih,
                     u16 i_mode);
@@ -172,16 +176,17 @@ int hk_alloc_blocks(struct super_block *sb, unsigned long *blks, bool zero,
 //                       bool rls_all);
 
 /* ======================= ANCHOR: objm.c ========================= */
-obj_ref_inode_t *ref_inode_create(u64 addr, u32 ino);
-void ref_inode_destroy(obj_ref_inode_t *ref);
-obj_ref_attr_t *ref_attr_create(u64 addr, u32 ino, u16 from_pkg, u64 dep_ofs);
-void ref_attr_destroy(obj_ref_attr_t *ref);
-obj_ref_dentry_t *ref_dentry_create(u64 addr, const char *name, u32 len,
-                                    u32 ino, u32 parent_ino);
-void ref_dentry_destroy(obj_ref_dentry_t *ref);
-obj_ref_data_t *ref_data_create(u64 addr, u32 ino, u64 ofs, u32 num,
-                                u64 data_offset);
-void ref_data_destroy(obj_ref_data_t *ref);
+obj_ref_inode_t *ref_inode_create(obj_mgr_t *mgr, u64 addr, u32 ino);
+void ref_inode_destroy(obj_mgr_t *mgr, obj_ref_inode_t *ref);
+obj_ref_attr_t *ref_attr_create(obj_mgr_t *mgr, u64 addr, u32 ino, u16 from_pkg,
+                                u64 dep_ofs);
+void ref_attr_destroy(obj_mgr_t *mgr, obj_ref_attr_t *ref);
+obj_ref_dentry_t *ref_dentry_create(obj_mgr_t *mgr, u64 addr, const char *name,
+                                    u32 len, u32 ino, u32 parent_ino);
+void ref_dentry_destroy(obj_mgr_t *mgr, obj_ref_dentry_t *ref);
+obj_ref_data_t *ref_data_create(obj_mgr_t *mgr, u64 addr, u32 ino, u64 ofs,
+                                u32 num, u64 data_offset);
+void ref_data_destroy(obj_mgr_t *mgr, obj_ref_data_t *ref);
 int obj_mgr_init(struct hk_sb_info *sbi, u32 cpus, obj_mgr_t *mgr);
 void obj_mgr_destroy(obj_mgr_t *mgr);
 int obj_mgr_load_dobj_control(obj_mgr_t *mgr, void *obj_ref, u8 type);
@@ -191,6 +196,11 @@ int obj_mgr_get_dobjs(obj_mgr_t *mgr, int cpuid, u32 ino, u8 type,
 int obj_mgr_load_imap_control(obj_mgr_t *mgr, struct hk_inode_info_header *sih);
 int obj_mgr_unload_imap_control(obj_mgr_t *mgr,
                                 struct hk_inode_info_header *sih);
+// gc attention for non-dax device
+int obj_mgr_load_obj2ref(obj_mgr_t *mgr, u64 addr, void *obj_ref);
+int obj_mgr_unload_obj2ref(obj_mgr_t *mgr, u64 addr, void *obj_ref);
+void *obj_mgr_get_obj2ref(obj_mgr_t *mgr, u64 addr);
+int obj_mgr_alter_obj2ref(obj_mgr_t *mgr, obj_ref_hdr_t *ref_hdr, u64 new_addr);
 struct hk_inode_info_header *obj_mgr_get_imap_inode(obj_mgr_t *mgr, u32 ino);
 int reclaim_dram_data(obj_mgr_t *mgr, struct hk_inode_info_header *sih,
                       data_update_t *update);
@@ -361,13 +371,18 @@ static u64 inline get_layout_idx(struct hk_sb_info *sbi, u64 offset) {
     return idx >= sbi->num_layout ? sbi->num_layout - 1 : idx;
 }
 
-static u64 inline get_ps_blk_addr(struct hk_sb_info *sbi, u32 blk) {
+static u64 inline get_ps_blk_addr(struct hk_sb_info *sbi, u64 blk) {
     return (u64)sbi->virt_addr + ((u64)blk << KILLER_BLK_SHIFT);
 }
 
-static u64 inline get_ps_entry_addr(struct hk_sb_info *sbi, u32 blk,
+static u64 inline get_ps_entry_addr(struct hk_sb_info *sbi, u64 blk,
                                     u32 entrynr) {
     return get_ps_blk_addr(sbi, blk) + ((u64)entrynr << KILLER_MTA_SHIFT);
+}
+
+static u64 inline is_last_ps_entry(struct hk_sb_info *sbi, u64 addr,
+                                   u32 entry_size) {
+    return ((addr + entry_size) & (KILLER_BLK_SIZE - 1)) == 0;
 }
 
 static inline struct tl_allocator *get_tl_allocator(struct hk_sb_info *sbi,

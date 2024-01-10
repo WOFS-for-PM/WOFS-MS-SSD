@@ -26,6 +26,8 @@
 #define UINT32_BITS 32
 #define UINT64_BITS 64
 
+void tl_dump_data_mgr(data_mgr_t *data_mgr);
+
 /* max supply for consecutive 8 bits */
 static const u64 bm64_consecutive_masks[8][64] = {
     /* 1 */
@@ -240,6 +242,41 @@ u32 bm64_fast_search_consecutive_bits(u64 bm, u32 bits) {
     return UINT64_BITS;
 }
 
+u32 bm64_fast_search_consecutive_bits_from(u64 bm, u8 start, u32 bits) {
+    const u64 *mask = bm64_consecutive_masks[bits - 1];
+    u32 i = 0;
+    u64 res1, res2, res3, res4;
+
+    bm = ~bm;
+#ifdef DEBUG
+    // check start is aligned with `bits`
+    if (start % bits) {
+        pr_debug("%s ERROR: start %u is not aligned with bits %u\n", __func__,
+                 start, bits);
+        return UINT64_BITS;
+    }
+#endif
+
+    for (i = start; i < UINT64_BITS; i += 4) {
+        res1 = (bm & mask[i]) ^ mask[i];
+        res2 = (bm & mask[i + 1]) ^ mask[i + 1];
+        res3 = (bm & mask[i + 2]) ^ mask[i + 2];
+        res4 = (bm & mask[i + 3]) ^ mask[i + 3];
+
+        if (!res1) {
+            return i;
+        } else if (!res2) {
+            return i + 1;
+        } else if (!res3) {
+            return i + 2;
+        } else if (!res4) {
+            return i + 3;
+        }
+    }
+
+    return UINT64_BITS;
+}
+
 void bm_set(u8 *bm, u32 i) {
     bm[i >> UINT8_SHIFT] |= (1 << (i & UINT8_MASK));
 }
@@ -250,6 +287,315 @@ void bm_clear(u8 *bm, u32 i) {
 
 u8 bm_test(u8 *bm, u32 i) {
     return bm[i >> UINT8_SHIFT] & (1 << (i & UINT8_MASK));
+}
+
+u32 bm_weight(u8 *bm, u32 len) {
+    return bitmap_weight((unsigned long *)bm, len);
+}
+
+// comparator returns: 0 if equal, >0 if a > b, <0 if a < b
+int range_insert_node(struct rb_root_cached *tree, struct range_node *new_node,
+                      int (*comparator)(unsigned long, unsigned long)) {
+    struct range_node *curr;
+    struct rb_node **temp, *parent;
+    int compVal;
+    bool left_most = true;
+
+    temp = &(tree->rb_root.rb_node);
+    parent = NULL;
+
+    while (*temp) {
+        curr = container_of(*temp, struct range_node, node);
+        if (comparator)
+            compVal = comparator(curr->low, new_node->low);
+        else
+            compVal = default_compare(curr->low, new_node->low);
+        parent = *temp;
+
+        if (compVal > 0) {
+            temp = &((*temp)->rb_left);
+        } else if (compVal < 0) {
+            temp = &((*temp)->rb_right);
+            left_most = false;
+        } else {
+            pr_debug("%s: node [%lu, %lu) already exists: "
+                     "[%lu, %lu)\n",
+                     __func__, new_node->low, new_node->high, curr->low,
+                     curr->high);
+            return -EINVAL;
+        }
+    }
+
+    rb_link_node(&new_node->node, parent, temp);
+    rb_insert_color_cached(&new_node->node, tree, left_most);
+
+    return 0;
+}
+
+/* return 1 if found, 0 if not found. Ret node indicates the node that is exact
+ * smaller than the blk */
+int range_find_node(struct rb_root_cached *tree, unsigned long low,
+                    struct range_node **ret_node,
+                    int (*comparator)(unsigned long, unsigned long)) {
+    struct range_node *curr = NULL;
+    struct rb_node *temp;
+    int compVal;
+    int ret = 0;
+
+    temp = tree->rb_root.rb_node;
+
+    while (temp) {
+        curr = container_of(temp, struct range_node, node);
+        if (comparator)
+            compVal = comparator(curr->low, low);
+        else
+            compVal = default_compare(curr->low, low);
+
+        if (compVal > 0) {
+            temp = temp->rb_left;
+        } else if (compVal < 0) {
+            temp = temp->rb_right;
+        } else {
+            ret = 1;
+            break;
+        }
+    }
+
+    *ret_node = curr;
+
+    return ret;
+}
+
+static int ___range_find_free_slot(struct rb_root_cached *tree,
+                                   unsigned long low, unsigned long high,
+                                   struct range_node **prev,
+                                   struct range_node **next) {
+    struct range_node *ret_node = NULL;
+    struct rb_node *tmp;
+    int ret;
+    u64 ret_node_rng_low;
+    u64 ret_node_rng_high;
+
+    ret = range_find_node(tree, low, &ret_node, NULL);
+    if (ret) {
+        pr_debug("%s ERROR: [%lu, %lu) already in free list\n", __func__, low,
+                 high);
+        return -EINVAL;
+    }
+
+    ret_node_rng_low = ret_node->low;
+    ret_node_rng_high = ret_node->high;
+
+    if (!ret_node) {
+        *prev = *next = NULL;
+    } else if (ret_node_rng_high <= low) {
+        *prev = ret_node;
+        tmp = rb_next(&ret_node->node);
+        if (tmp) {
+            *next = container_of(tmp, struct range_node, node);
+        } else {
+            *next = NULL;
+        }
+    } else if (ret_node_rng_low > high) {
+        *next = ret_node;
+        tmp = rb_prev(&ret_node->node);
+        if (tmp) {
+            *prev = container_of(tmp, struct range_node, node);
+        } else {
+            *prev = NULL;
+        }
+    } else {
+        pr_debug("%s ERROR: [%lu, %lu) overlaps with existing "
+                 "node [%lu, %lu)\n",
+                 __func__, low, high, ret_node_rng_low, ret_node_rng_high);
+        return -EINVAL;
+    }
+
+    return 0;
+}
+
+static bool __range_try_insert_range(struct rb_root_cached *tree,
+                                     struct range_node *prev,
+                                     struct range_node *next, unsigned long low,
+                                     unsigned long high) {
+    u64 prev_rng_high = prev ? prev->high : 0;
+    u64 next_rng_low = next ? next->low : 0;
+    u64 next_rng_high = next ? next->high : 0;
+
+    if (prev && next && low == prev_rng_high && high == next_rng_low) {
+        /* fits the hole */
+        rb_erase_cached(&next->node, tree);
+        prev->high = next_rng_high;
+        kfree(next);
+        return true;
+    } else if (prev && low == prev_rng_high) {
+        /* Aligns left */
+        prev->high = high;
+        return true;
+    } else if (next && high == next_rng_low) {
+        /* Aligns right */
+        next->low = low;
+        return true;
+    }
+
+    return false;
+}
+
+int range_insert_range(struct rb_root_cached *tree, unsigned long low,
+                       unsigned long high,
+                       int (*comparator)(unsigned long, unsigned long)) {
+    struct range_node *prev = NULL;
+    struct range_node *next = NULL;
+    int ret;
+
+    if (RB_EMPTY_ROOT(&tree->rb_root)) {
+        struct range_node *new_node =
+            kmalloc(sizeof(struct range_node), GFP_ATOMIC);
+        if (!new_node) {
+            pr_debug("%s ERROR: kmalloc failed\n", __func__);
+            return -ENOMEM;
+        }
+        new_node->low = low;
+        new_node->high = high;
+        ret = range_insert_node(tree, new_node, comparator);
+        if (ret) {
+            pr_debug("%s ERROR: insert node failed\n", __func__);
+            kfree(new_node);
+            return ret;
+        }
+        return ret;
+    }
+
+    ret = ___range_find_free_slot(tree, low, high, &prev, &next);
+    if (ret) {
+        pr_debug("%s ERROR: find free slot failed\n", __func__);
+        return ret;
+    }
+    if (!__range_try_insert_range(tree, prev, next, low, high)) {
+        // fail to insert
+        struct range_node *new_node =
+            kmalloc(sizeof(struct range_node), GFP_ATOMIC);
+        if (!new_node) {
+            pr_debug("%s ERROR: kmalloc failed\n", __func__);
+            return -ENOMEM;
+        }
+        new_node->low = low;
+        new_node->high = high;
+        ret = range_insert_node(tree, new_node, comparator);
+        if (ret) {
+            pr_debug("%s ERROR: insert node failed\n", __func__);
+            kfree(new_node);
+            return ret;
+        }
+    }
+
+    return ret;
+}
+
+#define range_traverse_tree(tree, temp, node)           \
+    for (temp = rb_first_cached(tree),                  \
+        node = rb_entry(temp, struct range_node, node); \
+         temp;                                          \
+         temp = rb_next(temp), node = rb_entry(temp, struct range_node, node))
+
+int range_remove_range(struct rb_root_cached *tree, unsigned long low,
+                       unsigned long high,
+                       int (*comparator)(unsigned long, unsigned long)) {
+    struct range_node *node;
+    struct rb_node *tmp;
+    struct list_head affected_nodes;
+    INIT_LIST_HEAD(&affected_nodes);
+    int ret;
+
+    struct affected_range_node {
+        struct list_head list;
+        struct range_node *node;
+    } * pos, *n;
+
+    range_traverse_tree(tree, tmp, node) {
+        if (node->low > high) {
+            break;
+        } else if (node->high < low) {
+            continue;
+        } else {
+            struct affected_range_node *affected_node =
+                kmalloc(sizeof(struct affected_range_node), GFP_ATOMIC);
+            if (!affected_node) {
+                pr_debug("%s ERROR: kmalloc failed\n", __func__);
+                return -ENOMEM;
+            }
+            affected_node->node = node;
+            list_add_tail(&affected_node->list, &affected_nodes);
+        }
+    }
+
+    list_for_each_entry_safe(pos, n, &affected_nodes, list) {
+        struct range_node *node = pos->node;
+        if (node->low >= low && node->high <= high) {
+            rb_erase_cached(&node->node, tree);
+            kfree(node);
+        } else if (node->low >= low && node->high > high) {
+            node->low = high + 1;
+        } else if (node->low < low && node->high <= high) {
+            node->high = low - 1;
+        } else if (node->low < low && node->high > high) {
+            struct range_node *new_node =
+                kmalloc(sizeof(struct range_node), GFP_ATOMIC);
+            if (!new_node) {
+                pr_debug("%s ERROR: kmalloc failed\n", __func__);
+                return -ENOMEM;
+            }
+            new_node->low = high + 1;
+            new_node->high = node->high;
+            node->high = low - 1;
+            ret = range_insert_node(tree, new_node, comparator);
+            if (ret) {
+                pr_debug("%s ERROR: insert node failed\n", __func__);
+                kfree(new_node);
+                return ret;
+            }
+        }
+    }
+
+    return 0;
+}
+
+static unsigned long __range_try_pop_range(void *key, void *value,
+                                           unsigned long req) {
+    struct range_node *node = value;
+
+    unsigned long remain = node->high - node->low + 1;
+    u64 allocated = 0;
+
+    allocated = remain >= req ? req : remain;
+    node->low += allocated;
+
+    return allocated;
+}
+
+unsigned long range_try_pop_N_once(struct rb_root_cached *tree,
+                                   unsigned long *N) {
+    struct range_node *node = NULL;
+    struct rb_node *tmp;
+    unsigned long allocated = 0;
+    unsigned long ret_low = 0;
+
+    range_traverse_tree(tree, tmp, node) {
+        allocated = __range_try_pop_range((void *)node->low, node, *N);
+        break;
+    }
+
+    *N = allocated;
+
+    if (node) {
+        ret_low = node->low - allocated;
+        if (node->low == node->high) {
+            rb_erase_cached(&node->node, tree);
+            kfree(node);
+        }
+    }
+
+    return ret_low;
 }
 
 tl_node_t *tl_create_node(void) {
@@ -434,11 +780,14 @@ static int tl_tree_find_free_slot(struct rb_root_cached *tree, u64 blk, u64 num,
 
 void tl_mgr_init(tl_allocator_t *alloc, u64 blk_size, u64 meta_size) {
     data_mgr_t *data_mgr = &alloc->data_manager;
+    meta_mgr_t *meta_mgr = &alloc->meta_manager;
     typed_meta_mgr_t *tmeta_mgr;
     tl_node_t *node;
     u64 blk = alloc->rng.high - alloc->rng.low + 1, i;
 
     data_mgr->free_tree = RB_ROOT_CACHED;
+    data_mgr->blk_size = blk_size;
+
     spin_lock_init(&data_mgr->spin);
     node = tl_create_node();
     node->blk = alloc->rng.low;
@@ -448,27 +797,36 @@ void tl_mgr_init(tl_allocator_t *alloc, u64 blk_size, u64 meta_size) {
     pr_debug("%s: free tree: %lu - %lu for cpu %d\n", __func__, node->blk,
              node->blk + blk - 1, alloc->cpuid);
 
+    meta_mgr->meta_entries_perblk = blk_size / meta_size;
+    BUG_ON(meta_mgr->meta_entries_perblk > UINT64_BITS);
+    if (meta_mgr->meta_entries_perblk == UINT64_BITS) {
+        meta_mgr->meta_entries_mask = (u64)-1;
+    } else {
+        meta_mgr->meta_entries_mask = (1 << meta_mgr->meta_entries_perblk) - 1;
+    }
+    meta_mgr->meta_size = meta_size;
+
     /* typed metadata managers */
     for (i = 0; i < TL_MTA_TYPE_NUM; i++) {
         tmeta_mgr = &alloc->meta_manager.tmeta_mgrs[i];
         hash_init(tmeta_mgr->used_blks);
         INIT_LIST_HEAD(&tmeta_mgr->free_list);
-        tmeta_mgr->entries_perblk = blk_size / meta_size;
-        BUG_ON(tmeta_mgr->entries_perblk > UINT64_BITS);
-        if (tmeta_mgr->entries_perblk == UINT64_BITS) {
-            tmeta_mgr->entries_mask = (u64)-1;
-        } else {
-            tmeta_mgr->entries_mask = (1 << tmeta_mgr->entries_perblk) - 1;
-        }
+        INIT_LIST_HEAD(&tmeta_mgr->pend_list);
         spin_lock_init(&tmeta_mgr->spin);
     }
 }
 
 int tl_alloc_init(tl_allocator_t *alloc, int cpuid, u64 blk, u64 num,
-                  u32 blk_size, u32 meta_size) {
+                  u32 blk_size, u32 meta_size, u8 mode, gc_ops_t *gc_ops) {
     alloc->rng.low = blk;
     alloc->rng.high = blk + num - 1;
     alloc->cpuid = cpuid;
+    alloc->mode = mode;
+    alloc->meta_manager.gc_ops = gc_ops;
+
+    if (mode == TL_ALLOC_OPU)
+        assert(gc_ops != NULL);
+
     tl_mgr_init(alloc, blk_size, meta_size);
     return 0;
 }
@@ -494,6 +852,21 @@ static bool __tl_try_find_avail_data_blks(void *key, void *value, void *data) {
     for (temp = rb_first_cached(tree), node = rb_entry(temp, tl_node_t, node); \
          temp; temp = rb_next(temp), node = rb_entry(temp, tl_node_t, node))
 
+#define IF_ALLOC_IPU(alloc) (alloc->mode == TL_ALLOC_IPU)
+#define IF_ALLOC_OPU(alloc) (alloc->mode == TL_ALLOC_OPU)
+
+#define tl_alloc_try_lock(plock, flags)                      \
+    {                                                        \
+        if (!(TL_ALLOC_HINT(flags) & TL_ALLOC_HINT_NO_LOCK)) \
+            spin_lock((plock));                              \
+    }
+
+#define tl_alloc_try_unlock(plock, flags)                    \
+    {                                                        \
+        if (!(TL_ALLOC_HINT(flags) & TL_ALLOC_HINT_NO_LOCK)) \
+            spin_unlock((plock));                            \
+    }
+
 /* alloc as many as possible */
 s32 tlalloc(tl_allocator_t *alloc, tlalloc_param_t *param) {
     data_mgr_t *data_mgr = &alloc->data_manager;
@@ -507,7 +880,8 @@ s32 tlalloc(tl_allocator_t *alloc, tlalloc_param_t *param) {
     u8 i;
 
     if (TL_ALLOC_TYPE(flags) == TL_BLK) {
-        spin_lock(&data_mgr->spin);
+        // spin_lock(&data_mgr->spin);
+        tl_alloc_try_lock(&data_mgr->spin, flags);
         tl_traverse_tree(&data_mgr->free_tree, temp, node) {
             if (__tl_try_find_avail_data_blks((void *)node->blk, node, param)) {
                 break;
@@ -518,22 +892,36 @@ s32 tlalloc(tl_allocator_t *alloc, tlalloc_param_t *param) {
                 rb_erase_cached(&param->_ret_node->node, &data_mgr->free_tree);
                 tl_free_node(param->_ret_node);
             }
-            spin_unlock(&data_mgr->spin);
+            // spin_unlock(&data_mgr->spin);
+            tl_alloc_try_unlock(&data_mgr->spin, flags);
         } else {
             ret = -ENOSPC;
-            spin_unlock(&data_mgr->spin);
+            // spin_unlock(&data_mgr->spin);
+            tl_alloc_try_unlock(&data_mgr->spin, flags);
             goto out;
         }
     } else if (TL_ALLOC_TYPE(flags) == TL_MTA) {
         typed_meta_mgr_t *tmeta_mgr;
         u8 idx = meta_type_to_idx(TL_ALLOC_MTA_TYPE(flags));
         tmeta_mgr = &meta_mgr->tmeta_mgrs[idx];
-        spin_lock(&tmeta_mgr->spin);
+        // spin_lock(&tmeta_mgr->spin);
+        tl_alloc_try_lock(&tmeta_mgr->spin, flags);
     retry:
         list_for_each(pos, &tmeta_mgr->free_list) {
             node = list_entry(pos, tl_node_t, list);
-            entrynr =
-                bm64_fast_search_consecutive_bits(node->mnode.bm, param->req);
+
+            if (IF_ALLOC_IPU(alloc)) {
+                // search from the start
+                entrynr = bm64_fast_search_consecutive_bits(node->mnode.bm,
+                                                            param->req);
+            } else if (IF_ALLOC_OPU(alloc)) {
+                // search from the last allocated entry
+                entrynr = bm64_fast_search_consecutive_bits_from(
+                    node->mnode.bm, node->mnode.tail, param->req);
+            }
+
+            assert(entrynr >= 0);
+
             if (entrynr != UINT64_BITS) {
                 param->_ret_node = node;
                 param->_ret_rng.low = node->blk;
@@ -541,21 +929,35 @@ s32 tlalloc(tl_allocator_t *alloc, tlalloc_param_t *param) {
                 for (i = 0; i < param->req; i++) {
                     bm_set((u8 *)&node->mnode.bm, entrynr + i);
                 }
+                node->mnode.tail = entrynr + param->req;
+
                 /* too full to allocate */
-                if ((node->mnode.bm & tmeta_mgr->entries_mask) ==
-                    tmeta_mgr->entries_mask) {
-                    list_del(&node->list);
+                if (IF_ALLOC_IPU(alloc)) {
+                    if ((node->mnode.bm & meta_mgr->meta_entries_mask) ==
+                        meta_mgr->meta_entries_mask) {
+                        list_del(&node->list);
+                    }
+                } else if (IF_ALLOC_OPU(alloc)) {
+                    if (node->mnode.tail >= meta_mgr->meta_entries_perblk) {
+                        list_del(&node->list);
+                        // NOTE: do not remove from hash table since `tlfree`
+                        // rely on it. Insert to the pend list for caller gc
+                        list_add_tail(&node->list, &tmeta_mgr->pend_list);
+                    }
                 }
-                spin_unlock(&tmeta_mgr->spin);
+                // spin_unlock(&tmeta_mgr->spin);
+                tl_alloc_try_unlock(&tmeta_mgr->spin, flags);
                 return 0;
             }
         }
-        spin_unlock(&tmeta_mgr->spin);
+        // spin_unlock(&tmeta_mgr->spin);
+        tl_alloc_try_unlock(&tmeta_mgr->spin, flags);
 
         /* alloc a block to hold metadata */
         tlalloc_param_t alloc_blk_param;
 
-        tl_build_alloc_param(&alloc_blk_param, 1, TL_BLK);
+        tl_build_alloc_param(&alloc_blk_param, 1,
+                             TL_BLK | TL_ALLOC_HINT(flags));
         ret = tlalloc(alloc, &alloc_blk_param);
         if (ret < 0) {
             goto out;
@@ -566,7 +968,8 @@ s32 tlalloc(tl_allocator_t *alloc, tlalloc_param_t *param) {
 
         param->_ret_allocated = 1;
 
-        spin_lock(&tmeta_mgr->spin);
+        // spin_lock(&tmeta_mgr->spin);
+        tl_alloc_try_lock(&tmeta_mgr->spin, flags);
         hash_add(tmeta_mgr->used_blks, &node->hnode, node->blk);
 
         pr_debug("alloc blk %lu for meta type %x (%s)\n", node->blk,
@@ -623,7 +1026,6 @@ void tlfree(tl_allocator_t *alloc, tlfree_param_t *param) {
     meta_mgr_t *meta_mgr = &alloc->meta_manager;
     tl_node_t *node;
     u16 flags = param->flags;
-
     param->freed = 0;
 
     if (TL_ALLOC_TYPE(flags) == TL_BLK) {
@@ -640,7 +1042,8 @@ void tlfree(tl_allocator_t *alloc, tlfree_param_t *param) {
             BUG_ON(1);
         }
 
-        spin_lock(&data_mgr->spin);
+        // spin_lock(&data_mgr->spin);
+        tl_alloc_try_lock(&data_mgr->spin, flags);
         ret = tl_tree_find_free_slot(&data_mgr->free_tree, blk, num, flags,
                                      &prev, &next);
         if (ret) {
@@ -650,15 +1053,18 @@ void tlfree(tl_allocator_t *alloc, tlfree_param_t *param) {
             BUG_ON(1);
         }
         __tl_try_insert_data_blks(&data_mgr->free_tree, prev, next, param);
-        spin_unlock(&data_mgr->spin);
+        // spin_unlock(&data_mgr->spin);
+        tl_alloc_try_unlock(&data_mgr->spin, flags);
 
         if (param->freed == 0) {
             node = tl_create_node();
             node->blk = blk;
             node->dnode.num = num;
-            spin_lock(&data_mgr->spin);
+            // spin_lock(&data_mgr->spin);
+            tl_alloc_try_lock(&data_mgr->spin, flags);
             tl_tree_insert_node(&data_mgr->free_tree, node);
-            spin_unlock(&data_mgr->spin);
+            // spin_unlock(&data_mgr->spin);
+            tl_alloc_try_unlock(&data_mgr->spin, flags);
         }
     } else if (TL_ALLOC_TYPE(flags) == TL_MTA) {
         u64 blk = param->blk;
@@ -676,7 +1082,8 @@ void tlfree(tl_allocator_t *alloc, tlfree_param_t *param) {
 
         tmeta_mgr = &meta_mgr->tmeta_mgrs[idx];
 
-        spin_lock(&tmeta_mgr->spin);
+        // spin_lock(&tmeta_mgr->spin);
+        tl_alloc_try_lock(&tmeta_mgr->spin, flags);
         hash_for_each_possible(tmeta_mgr->used_blks, cur, hnode, blk) {
             if (cur->blk == blk) {
                 for (i = 0; i < entrynum; i++) {
@@ -697,10 +1104,20 @@ void tlfree(tl_allocator_t *alloc, tlfree_param_t *param) {
                     tl_free_node(cur);
 
                     tlfree_param_t free_blk_param;
-                    tl_build_free_param(&free_blk_param, blk, 1, TL_BLK);
+                    tl_build_free_param(&free_blk_param, blk, 1,
+                                        TL_BLK | TL_ALLOC_HINT(flags));
                     tlfree(alloc, &free_blk_param);
 
                     param->freed |= TLFREE_BLK;
+                } else {
+                    if (IF_ALLOC_IPU(alloc)) {
+                        if (__list_check_entry_freed(&cur->list)) {
+                            // free to be reallocated
+                            list_add_tail(&cur->list, &tmeta_mgr->free_list);
+                        }
+                    } else if (IF_ALLOC_OPU(alloc)) {
+                        // Do nothing
+                    }
                 }
                 break;
             }
@@ -710,7 +1127,8 @@ void tlfree(tl_allocator_t *alloc, tlfree_param_t *param) {
             BUG_ON(1);
         }
 
-        spin_unlock(&tmeta_mgr->spin);
+        // spin_unlock(&tmeta_mgr->spin);
+        tl_alloc_try_unlock(&tmeta_mgr->spin, flags);
     }
 }
 
@@ -753,13 +1171,15 @@ void tlrestore(tl_allocator_t *alloc, tlrestore_param_t *param) {
         u64 num = param->num;
         struct affect_node *anode;
 
-        spin_lock(&data_mgr->spin);
+        // spin_lock(&data_mgr->spin);
+        tl_alloc_try_lock(&data_mgr->spin, flags);
         tl_traverse_tree(&data_mgr->free_tree, temp, node) {
             if (__tl_try_restore_data_blks((void *)node->blk, node, param)) {
                 break;
             }
         }
-        spin_unlock(&data_mgr->spin);
+        // spin_unlock(&data_mgr->spin);
+        tl_alloc_try_unlock(&data_mgr->spin, flags);
 
         /* traverse affected_nodes */
         list_for_each_safe(pos, n, &param->affected_nodes) {
@@ -781,9 +1201,11 @@ void tlrestore(tl_allocator_t *alloc, tlrestore_param_t *param) {
                 new_node->blk = blk + num;
                 new_node->dnode.num =
                     node->blk + node->dnode.num - new_node->blk;
-                spin_lock(&data_mgr->spin);
+                // spin_lock(&data_mgr->spin);
+                tl_alloc_try_lock(&data_mgr->spin, flags);
                 tl_tree_insert_node(&data_mgr->free_tree, new_node);
-                spin_unlock(&data_mgr->spin);
+                // spin_unlock(&data_mgr->spin);
+                tl_alloc_try_unlock(&data_mgr->spin, flags);
                 node->dnode.num = blk - node->blk;
             }
             list_del(&anode->list);
@@ -805,7 +1227,9 @@ void tlrestore(tl_allocator_t *alloc, tlrestore_param_t *param) {
 
         tmeta_mgr =
             &meta_mgr->tmeta_mgrs[meta_type_to_idx(TL_ALLOC_MTA_TYPE(flags))];
-        spin_lock(&tmeta_mgr->spin);
+        // spin_lock(&tmeta_mgr->spin);
+        tl_alloc_try_lock(&tmeta_mgr->spin, flags);
+
         node = NULL;
         hash_for_each_possible(tmeta_mgr->used_blks, cur, hnode, blk) {
             if (cur->blk == blk) {
@@ -829,13 +1253,100 @@ void tlrestore(tl_allocator_t *alloc, tlrestore_param_t *param) {
         for (i = 0; i < entrynum; i++) {
             bm_set((u8 *)&node->mnode.bm, entrynr + i);
         }
+        node->mnode.tail = entrynr + entrynum;
+
         /* too full to alloc */
-        if ((node->mnode.bm & tmeta_mgr->entries_mask) ==
-            tmeta_mgr->entries_mask) {
-            list_del(&node->list);
+        if (IF_ALLOC_IPU(alloc)) {
+            if ((node->mnode.bm & meta_mgr->meta_entries_mask) ==
+                meta_mgr->meta_entries_mask) {
+                list_del(&node->list);
+            }
+        } else if (IF_ALLOC_OPU(alloc)) {
+            if (node->mnode.tail >= meta_mgr->meta_entries_perblk) {
+                list_del(&node->list);
+                // NOTE: do not remove from hash table since `tlfree` rely on
+                // it. Insert to the pend list for caller gc
+                list_add_tail(&node->list, &tmeta_mgr->pend_list);
+            }
         }
-        spin_unlock(&tmeta_mgr->spin);
+        // spin_unlock(&tmeta_mgr->spin);
+        tl_alloc_try_unlock(&tmeta_mgr->spin, flags);
     }
+}
+
+unsigned long tlgc(tl_allocator_t *alloc, unsigned long max) {
+    data_mgr_t *data_mgr = &alloc->data_manager;
+    meta_mgr_t *meta_mgr = &alloc->meta_manager;
+    typed_meta_mgr_t *tmeta_mgr;
+    struct list_head *pend_list, victim_list;
+    victim_node_t *pos, *n;
+    tl_node_t *node;
+    struct rb_node *tmp;
+    unsigned long gced = 0;
+    int m_alloc_type_idx = 0, ret, i;
+    u64 blks_to_reserve = 0, blks_to_reclaim = 0, blks_remain = 0;
+    u32 entry_size;
+    u64 entries_perblk;
+
+    if (IF_ALLOC_IPU(alloc)) {
+        return 0;
+    }
+
+    // gc per type
+    while (max) {
+        tmeta_mgr = &meta_mgr->tmeta_mgrs[m_alloc_type_idx];
+        pend_list = &tmeta_mgr->pend_list;
+        entry_size = meta_type_to_idx(m_alloc_type_idx);
+        entries_perblk = HK_BLK_SZ / entry_size;
+
+        // frozen alloc
+        spin_lock(&data_mgr->spin);
+        spin_lock(&tmeta_mgr->spin);
+
+        INIT_LIST_HEAD(&victim_list);
+
+        blks_remain = 0;
+        tl_traverse_tree(&data_mgr->free_tree, tmp, node) {
+            blks_remain += node->dnode.num;
+        }
+
+        // select a number of nodes to migrate, return the number of nodes
+        blks_to_reclaim = meta_mgr->gc_ops->victim_selection(
+            alloc, pend_list, &victim_list, blks_remain, &blks_to_reserve);
+        if (blks_to_reclaim == 0) {
+            spin_unlock(&tmeta_mgr->spin);
+            spin_unlock(&data_mgr->spin);
+            m_alloc_type_idx = m_alloc_type_idx + 1;
+            if (m_alloc_type_idx == TL_MTA_TYPE_NUM) {
+                break;
+            }
+            continue;
+        }
+
+        assert(blks_to_reserve <= blks_remain);
+        assert(blks_to_reclaim >= blks_to_reserve);
+
+        gced += blks_to_reclaim;
+
+        // migrate nodes
+        // TODO: handle lock contention, be careful to
+        //       use lock there
+        // USE MACRO `TL_ALLOC_HINT_NO_LOCK`
+        ret = meta_mgr->gc_ops->migration(alloc, &victim_list, m_alloc_type_idx,
+                                          blks_to_reserve);
+        assert(!ret);
+
+        ret = meta_mgr->gc_ops->post_clean(alloc, &victim_list);
+        assert(!ret);
+
+        // unfrozen alloc
+        spin_unlock(&tmeta_mgr->spin);
+        spin_unlock(&data_mgr->spin);
+
+        max -= gced;
+    }
+
+    return gced;
 }
 
 void tl_destory(tl_allocator_t *alloc) {

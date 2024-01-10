@@ -7,55 +7,62 @@ static int reserve_pkg_space(obj_mgr_t *mgr, u64 *ps_addr, u16 m_alloc_type,
                              u32 num);
 
 /* == constructive functions == */
-inline obj_ref_inode_t *ref_inode_create(u64 addr, u32 ino) {
+inline obj_ref_inode_t *ref_inode_create(obj_mgr_t *mgr, u64 addr, u32 ino) {
     obj_ref_inode_t *ref = hk_alloc_obj_ref_inode();
     ref->hdr.ref = 1;
     ref->hdr.addr = addr;
     ref->hdr.ino = ino;
+    obj_mgr_load_obj2ref(mgr, addr, ref);
     return ref;
 }
 
-inline void ref_inode_destroy(obj_ref_inode_t *ref) {
+inline void ref_inode_destroy(obj_mgr_t *mgr, obj_ref_inode_t *ref) {
     if (ref) {
+        obj_mgr_unload_obj2ref(mgr, ref->hdr.addr, ref);
         hk_free_obj_ref_inode(ref);
     }
 }
 
-inline obj_ref_attr_t *ref_attr_create(u64 addr, u32 ino, u16 from_pkg,
-                                       u64 dep_ofs) {
+inline obj_ref_attr_t *ref_attr_create(obj_mgr_t *mgr, u64 addr, u32 ino,
+                                       u16 from_pkg, u64 dep_ofs) {
     obj_ref_attr_t *ref = hk_alloc_obj_ref_attr();
     ref->hdr.ref = 1;
     ref->hdr.addr = addr;
     ref->hdr.ino = ino;
     ref->from_pkg = from_pkg;
     ref->dep_ofs = dep_ofs;
+    obj_mgr_load_obj2ref(mgr, addr, ref);
     return ref;
 }
 
-inline void ref_attr_destroy(obj_ref_attr_t *ref) {
+inline void ref_attr_destroy(obj_mgr_t *mgr, obj_ref_attr_t *ref) {
     if (ref) {
+        obj_mgr_unload_obj2ref(mgr, ref->hdr.addr, ref);
         hk_free_obj_ref_attr(ref);
     }
 }
 
-inline obj_ref_dentry_t *ref_dentry_create(u64 addr, const char *name, u32 len,
-                                           u32 ino, u32 parent_ino) {
+inline obj_ref_dentry_t *ref_dentry_create(obj_mgr_t *mgr, u64 addr,
+                                           const char *name, u32 len, u32 ino,
+                                           u32 parent_ino) {
     obj_ref_dentry_t *ref = hk_alloc_obj_ref_dentry();
     ref->hdr.addr = addr;
     ref->hdr.ino = parent_ino;
     ref->target_ino = ino;
     ref->hash = BKDRHash(name, len);
+    obj_mgr_load_obj2ref(mgr, addr, ref);
     return ref;
 }
 
-inline void ref_dentry_destroy(obj_ref_dentry_t *ref) {
+inline void ref_dentry_destroy(obj_mgr_t *mgr, obj_ref_dentry_t *ref) {
     if (ref) {
+        obj_mgr_unload_obj2ref(mgr, ref->hdr.addr, ref);
         hk_free_obj_ref_dentry(ref);
     }
 }
 
-inline obj_ref_data_t *ref_data_create(u64 addr, u32 ino, u64 ofs, u32 num,
-                                       u64 data_offset) {
+inline obj_ref_data_t *ref_data_create(obj_mgr_t *mgr, u64 addr, u32 ino,
+                                       u64 ofs, u32 num, u64 data_offset) {
     obj_ref_data_t *ref = hk_alloc_obj_ref_data();
     ref->hdr.ref = 1;
     ref->hdr.addr = addr;
@@ -64,16 +71,33 @@ inline obj_ref_data_t *ref_data_create(u64 addr, u32 ino, u64 ofs, u32 num,
     ref->num = num;
     ref->data_offset = data_offset;
     ref->type = DATA_REF;
+    obj_mgr_load_obj2ref(mgr, addr, ref);
     return ref;
 }
 
-inline void ref_data_destroy(obj_ref_data_t *ref) {
+inline void ref_data_destroy(obj_mgr_t *mgr, obj_ref_data_t *ref) {
     if (ref) {
+        obj_mgr_unload_obj2ref(mgr, ref->hdr.addr, ref);
         hk_free_obj_ref_data(ref);
     }
 }
 
 /* == In-DRAM obj managements == */
+static int __obj2ref_map_init(obj2ref_map_t *map, int cpus) {
+    int ret = 0;
+    int i;
+
+    map->num_maps = cpus;
+    map->maps = kzalloc(sizeof(struct _obj2ref_map) * cpus, GFP_KERNEL);
+
+    for (i = 0; i < cpus; i++) {
+        rng_lock_init(&map->maps[i].rng_lock, cpus, NULL);
+        hash_init(map->maps[i].map);
+    }
+
+    return ret;
+}
+
 int obj_mgr_init(struct hk_sb_info *sbi, u32 cpus, obj_mgr_t *mgr) {
     int ret = 0, i;
 
@@ -97,6 +121,8 @@ int obj_mgr_init(struct hk_sb_info *sbi, u32 cpus, obj_mgr_t *mgr) {
         spin_lock_init(&mgr->d_roots[i].dentry_lock);
     }
 
+    // init obj2ref_map
+    __obj2ref_map_init(&mgr->obj2ref_map, cpus);
 out:
     return ret;
 }
@@ -118,9 +144,9 @@ void obj_mgr_destroy(obj_mgr_t *mgr) {
         hash_for_each_safe(mgr->prealloc_imap.map, bkt, temp, cur, hnode) {
             hash_del(&cur->hnode);
             if (cur->latest_fop.latest_attr)
-                ref_attr_destroy(cur->latest_fop.latest_attr);
+                ref_attr_destroy(mgr, cur->latest_fop.latest_attr);
             if (cur->latest_fop.latest_inode)
-                ref_inode_destroy(cur->latest_fop.latest_inode);
+                ref_inode_destroy(mgr, cur->latest_fop.latest_inode);
             cur->latest_fop.latest_attr = NULL;
             cur->latest_fop.latest_inode = NULL;
             hk_free_hk_inode_info_header(cur);
@@ -145,7 +171,7 @@ void obj_mgr_destroy(obj_mgr_t *mgr) {
                 list_for_each_safe(pos, n, &d_obj_list->list) {
                     ref_data = list_entry(pos, obj_ref_data_t, node);
                     list_del(pos);
-                    ref_data_destroy(ref_data);
+                    ref_data_destroy(mgr, ref_data);
                 }
                 hash_del(&d_obj_list->hnode);
                 kfree(d_obj_list);
@@ -156,7 +182,7 @@ void obj_mgr_destroy(obj_mgr_t *mgr) {
                 list_for_each_safe(pos, n, &d_obj_list->list) {
                     ref_dentry = list_entry(pos, obj_ref_dentry_t, node);
                     list_del(pos);
-                    ref_dentry_destroy(ref_dentry);
+                    ref_dentry_destroy(mgr, ref_dentry);
                 }
                 hash_del(&d_obj_list->hnode);
                 kfree(d_obj_list);
@@ -376,6 +402,70 @@ struct hk_inode_info_header *obj_mgr_get_imap_inode(obj_mgr_t *mgr, u32 ino) {
     }
     rng_unlock(&imap->rng_lock, slot);
     return NULL;
+}
+
+int obj_mgr_load_obj2ref(obj_mgr_t *mgr, u64 addr, void *obj_ref) {
+    struct hk_sb_info *sbi = mgr->sbi;
+    u64 offset = get_ps_offset(sbi, addr);
+    int idx = get_layout_idx(sbi, offset);
+    obj2ref_map_t *map = &mgr->obj2ref_map;
+    struct _obj2ref_map *obj2ref_map = &map->maps[idx];
+
+    int slot = hash_min(offset, HASH_BITS(obj2ref_map->map));
+
+    rng_lock(&obj2ref_map->rng_lock, slot);
+    hlist_add_head(&((obj_ref_hdr_t *)obj_ref)->hnode, &obj2ref_map->map[slot]);
+    rng_unlock(&obj2ref_map->rng_lock, slot);
+
+    return 0;
+}
+
+int obj_mgr_unload_obj2ref(obj_mgr_t *mgr, u64 addr, void *obj_ref) {
+    struct hk_sb_info *sbi = mgr->sbi;
+    u64 offset = get_ps_offset(sbi, addr);
+    int idx = get_layout_idx(sbi, offset);
+    obj2ref_map_t *map = &mgr->obj2ref_map;
+    struct _obj2ref_map *obj2ref_map = &map->maps[idx];
+
+    int slot = hash_min(offset, HASH_BITS(obj2ref_map->map));
+
+    rng_lock(&obj2ref_map->rng_lock, slot);
+    hash_del(&((obj_ref_hdr_t *)obj_ref)->hnode);
+    rng_unlock(&obj2ref_map->rng_lock, slot);
+
+    return 0;
+}
+
+void *obj_mgr_get_obj2ref(obj_mgr_t *mgr, u64 addr) {
+    struct hk_sb_info *sbi = mgr->sbi;
+    u64 offset = get_ps_offset(sbi, addr);
+    int idx = get_layout_idx(sbi, offset);
+    obj2ref_map_t *map = &mgr->obj2ref_map;
+    struct _obj2ref_map *obj2ref_map = &map->maps[idx];
+    obj_ref_hdr_t *ref_hdr;
+    int slot = hash_min(offset, HASH_BITS(obj2ref_map->map));
+
+    rng_lock(&obj2ref_map->rng_lock, slot);
+    hlist_for_each_entry(ref_hdr, &obj2ref_map->map[slot], hnode) {
+        if (ref_hdr->addr == addr) {
+            rng_unlock(&obj2ref_map->rng_lock, slot);
+            return ref_hdr;
+        }
+    }
+    rng_unlock(&obj2ref_map->rng_lock, slot);
+    return NULL;
+}
+
+// new_addr is offset
+int obj_mgr_alter_obj2ref(obj_mgr_t *mgr, obj_ref_hdr_t *ref_hdr,
+                          u64 new_addr) {
+    if (ref_hdr) {
+        obj_mgr_unload_obj2ref(mgr, ref_hdr->addr, ref_hdr);
+        ref_hdr->addr = new_addr;
+        obj_mgr_load_obj2ref(mgr, new_addr, ref_hdr);
+        return 0;
+    }
+    return -EIO;
 }
 
 static claim_req_t *claim_req_create(u64 req_addr, u16 req_type, u16 dep_type,
@@ -631,7 +721,7 @@ int reclaim_dram_attr(obj_mgr_t *mgr, struct hk_inode_info_header *sih) {
             break;
     }
     /* since we use kmem cache, allocation and free are very fast */
-    ref_attr_destroy(ref);
+    ref_attr_destroy(mgr, ref);
     sih->latest_fop.latest_attr = NULL;
     sih->latest_fop.latest_inline_attr = 0;
     return 0;
@@ -702,8 +792,8 @@ int reclaim_dram_data(obj_mgr_t *mgr, struct hk_inode_info_header *sih,
             }
 
             new_ref =
-                ref_data_create(get_ps_offset(sbi, addr), sih->ino, new_ofs,
-                                behind_remained_blks, new_data_ofs);
+                ref_data_create(mgr, get_ps_offset(sbi, addr), sih->ino,
+                                new_ofs, behind_remained_blks, new_data_ofs);
             for (blk = 0; blk < behind_remained_blks; blk++) {
                 linix_insert(&sih->ix, GET_ALIGNED_BLKNR(new_ofs) + blk,
                              (u64)new_ref, false);
@@ -720,7 +810,7 @@ int reclaim_dram_data(obj_mgr_t *mgr, struct hk_inode_info_header *sih,
             obj_mgr_unload_dobj_control(mgr, (void *)ref, OBJ_DATA);
             do_reclaim_dram_pkg(sbi, mgr, get_ps_addr(sbi, ref->hdr.addr),
                                 PKG_DATA);
-            ref_data_destroy(ref);
+            ref_data_destroy(mgr, ref);
         } else {
             ref->num = before_remained_blks;
         }
@@ -758,7 +848,8 @@ int ur_dram_latest_inode(obj_mgr_t *mgr, struct hk_inode_info_header *sih,
     struct hk_sb_info *sbi = mgr->sbi;
 
     if (!sih->latest_fop.latest_inode) {
-        sih->latest_fop.latest_inode = ref_inode_create(ps_inode, sih->ino);
+        sih->latest_fop.latest_inode =
+            ref_inode_create(mgr, ps_inode, sih->ino);
     } else {
         sih->latest_fop.latest_inode->hdr.addr = ps_inode;
     }
@@ -776,12 +867,12 @@ int ur_dram_latest_attr(obj_mgr_t *mgr, struct hk_inode_info_header *sih,
     struct hk_sb_info *sbi = mgr->sbi;
     if (!sih->latest_fop.latest_attr) {
         if (update->inline_update) {
-            sih->latest_fop.latest_attr =
-                ref_attr_create(0, sih->ino, update->from_pkg, update->dep_ofs);
+            sih->latest_fop.latest_attr = ref_attr_create(
+                mgr, 0, sih->ino, update->from_pkg, update->dep_ofs);
             sih->latest_fop.latest_inline_attr = update->addr;
         } else {
             sih->latest_fop.latest_attr = ref_attr_create(
-                update->addr, sih->ino, update->from_pkg, update->dep_ofs);
+                mgr, update->addr, sih->ino, update->from_pkg, update->dep_ofs);
         }
     } else {
         if (update->inline_update) {
@@ -789,7 +880,7 @@ int ur_dram_latest_attr(obj_mgr_t *mgr, struct hk_inode_info_header *sih,
         } else {
             reclaim_dram_attr(mgr, sih);
             sih->latest_fop.latest_attr = ref_attr_create(
-                update->addr, sih->ino, update->from_pkg, update->dep_ofs);
+                mgr, update->addr, sih->ino, update->from_pkg, update->dep_ofs);
         }
         sih->latest_fop.latest_attr->from_pkg = update->from_pkg;
         sih->latest_fop.latest_attr->dep_ofs = update->dep_ofs;
@@ -827,8 +918,8 @@ int ur_dram_data(obj_mgr_t *mgr, struct hk_inode_info_header *sih,
     HK_START_TIMING(data_claim_t, time);
     if (!update->build_from_exist) {
         /* handle data to obj mgr */
-        ref = ref_data_create(update->addr, sih->ino, update->ofs, update->num,
-                              get_ps_blk_offset(sbi, update->blk));
+        ref = ref_data_create(mgr, update->addr, sih->ino, update->ofs,
+                              update->num, get_ps_blk_offset(sbi, update->blk));
         obj_mgr_load_dobj_control(mgr, (void *)ref, OBJ_DATA);
     } else {
         ref = (obj_ref_data_t *)update->exist_ref;
@@ -847,13 +938,15 @@ int ur_dram_data(obj_mgr_t *mgr, struct hk_inode_info_header *sih,
     /* make data visible to user */
     for (i = 0; i < num; i++) {
         linix_insert(&sih->ix, ofs_blk + i, (u64)ref, true);
+        hk_dbg("%s: insert ino: %u, ofs_blk: %u, ref->data_offset: 0x%llx\n",
+               __func__, sih->ino, ofs_blk + i, ref->data_offset);
     }
 
     HK_END_TIMING(data_claim_t, time);
     return 0;
 }
 
-/* == In-PM pkg managements == */
+/* == In-Storage pkg managements == */
 int reserve_pkg_space_in_layout(obj_mgr_t *mgr, struct hk_layout_info *layout,
                                 u64 *ps_addr, u32 num, u16 m_alloc_type) {
     struct hk_sb_info *sbi = mgr->sbi;
@@ -1425,12 +1518,13 @@ int create_new_inode_pkg(struct hk_sb_info *sbi, u16 mode, const char *name,
 
     if (create_type == CREATE_FOR_LINK) {
         ref_dentry =
-            ref_dentry_create(get_ps_offset(sbi, (u64)obj_dentry), name,
-                              strlen(name), orig_ino, parent_ino);
+            ref_dentry_create(obj_mgr, get_ps_offset(sbi, (u64)obj_dentry),
+                              name, strlen(name), orig_ino, parent_ino);
     } else {
         /* handle dentry to obj mgr  */
-        ref_dentry = ref_dentry_create(get_ps_offset(sbi, (u64)obj_dentry),
-                                       name, strlen(name), ino, parent_ino);
+        ref_dentry =
+            ref_dentry_create(obj_mgr, get_ps_offset(sbi, (u64)obj_dentry),
+                              name, strlen(name), ino, parent_ino);
     }
     obj_mgr_load_dobj_control(obj_mgr, (void *)ref_dentry, OBJ_DENTRY);
     ((out_create_pkg_param_t *)out_param->private)->ref = ref_dentry;

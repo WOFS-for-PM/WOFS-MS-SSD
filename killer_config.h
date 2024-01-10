@@ -113,6 +113,8 @@
 #define HK_PERCORE_JSLOTS (1) /* per core journal slots */
 #define HK_READAHEAD_WINDOW (16 * 1024)
 #define HK_RESCUE_WORKERS 8 /* for failure recovery */
+#define HK_ROOT_INO (0)
+#define HK_RESV_NUM (1)
 
 #define CACHELINE_SIZE (64)
 #define CACHELINE_MASK (~(CACHELINE_SIZE - 1))
