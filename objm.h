@@ -228,12 +228,13 @@ static_assert(sizeof(obj_ref_data_t) <= 72);
 
 typedef struct obj_ref_dentry {
     obj_ref_hdr_t hdr;
+    struct hlist_node hnode;
     struct list_head node;
     u32 target_ino;
     unsigned long hash;
 } obj_ref_dentry_t;
 
-static_assert(sizeof(obj_ref_dentry_t) <= 64);
+static_assert(sizeof(obj_ref_dentry_t) <= 80);
 
 /* File operations related reference */
 typedef struct obj_ref_inode { /* __INODE_MANAGE_THIS */
@@ -397,6 +398,7 @@ typedef struct out_create_pkg_param {
 #define MTA_PKG_ATTR_SIZE (MTA_PKG_ATTR_BLK << KILLER_MTA_SHIFT)
 #define MTA_PKG_CREATE_SIZE (MTA_PKG_CREATE_BLK << KILLER_MTA_SHIFT)
 #define MTA_PKG_UNLINK_SIZE (MTA_PKG_UNLINK_BLK << KILLER_MTA_SHIFT)
+#define MTA_PKG_MAX_SIZE (MTA_PKG_CREATE_SIZE)
 
 #define GET_OFS_INBLK(ofs_addr) ((ofs_addr) & (KILLER_BLK_SIZE - 1))
 #define GET_ENTRYNR(ofs_addr) (GET_OFS_INBLK(ofs_addr) >> KILLER_MTA_SHIFT)

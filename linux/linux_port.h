@@ -54,6 +54,9 @@ typedef __s16 s16;
 typedef __s32 s32;
 typedef __s64 s64;
 
+#define IS_ERR(x) ((unsigned long)(void *)(x) >= (unsigned long)-4095)
+#define PTR_ERR(x) ((long)(void *)(x))
+
 #define __aligned(x) __attribute__((aligned(x)))
 // Atomic types
 typedef struct atomic64 {
@@ -242,8 +245,81 @@ static inline int kthread_stop(struct task_struct *k) {
     return 0;
 }
 
-struct super_block {
-    void *s_fs_info;
+#define S_SYNC 1         /* Writes are synced at once */
+#define S_NOATIME 2      /* Do not update access times */
+#define S_APPEND 4       /* Append-only file */
+#define S_IMMUTABLE 8    /* Immutable file */
+#define S_DEAD 16        /* removed, but still open directory */
+#define S_NOQUOTA 32     /* Inode is not counted to quota */
+#define S_DIRSYNC 64     /* Directory modifications are synchronous */
+#define S_NOCMTIME 128   /* Do not update file c/mtime */
+#define S_SWAPFILE 256   /* Do not truncate: swapon got its bmaps */
+#define S_PRIVATE 512    /* Inode is fs-internal */
+#define S_IMA 1024       /* Inode has an associated IMA struct */
+#define S_AUTOMOUNT 2048 /* Automount/referral quasi-directory */
+#define S_NOSEC 4096     /* no suid or xattr security attributes */
+#define S_DAX 8192       /* Direct Access, avoiding the page cache */
+
+/* legacy typedef, should eventually be removed */
+typedef void *fl_owner_t;
+
+struct qstr {
+    u32 hash;
+    u32 len;
+    const unsigned char *name;
+};
+
+#define QSTR_INIT(n, l) \
+    { .len = l, .name = n }
+
+static struct qstr slash_name = QSTR_INIT((const unsigned char *)"/", 1);
+
+struct dentry {
+    struct dentry *d_parent; /* parent directory */
+    struct qstr d_name;
+    struct inode *d_inode;    /* Where the name belongs to - NULL is
+                               * negative */
+    struct super_block *d_sb; /* The root of the dentry tree */
+    struct hlist_node d_hash; /* lookup hash list */
+
+    struct list_head d_child;   /* child of parent list */
+    struct list_head d_subdirs; /* our children */
+};
+
+struct path {
+    struct vfsmount *mnt;
+    struct dentry *dentry;
+};
+
+struct file {
+    struct path f_path;
+    struct inode *f_inode; /* cached value */
+    const struct file_operations *f_op;
+    loff_t f_pos;
+    void *private_data;
+};
+
+struct dir_context;
+typedef int (*filldir_t)(struct dir_context *, const char *, int, loff_t, u64,
+                         unsigned);
+struct dir_context {
+    filldir_t actor;
+    loff_t pos;
+};
+
+static inline struct inode *file_inode(const struct file *f) {
+    return f->f_inode;
+}
+
+struct file_operations {
+    loff_t (*llseek)(struct file *, loff_t, int);
+    ssize_t (*read)(struct file *, char __user *, size_t, loff_t *);
+    ssize_t (*write)(struct file *, const char __user *, size_t, loff_t *);
+    int (*open)(struct inode *, struct file *);
+    int (*flush)(struct file *, fl_owner_t id);
+    int (*fsync)(struct file *, loff_t, loff_t, int datasync);
+    long (*fallocate)(struct file *file, int mode, loff_t offset, loff_t len);
+    int (*iterate)(struct file *, struct dir_context *);
 };
 
 struct super_operations {
@@ -252,16 +328,30 @@ struct super_operations {
     void (*evict_inode)(struct inode *);
 };
 
+struct super_block {
+    struct super_operations *s_op;
+    struct dentry *s_root;
+    void *s_fs_info;
+    unsigned char s_blocksize_bits;
+    unsigned long s_blocksize;
+};
+
 typedef unsigned int kuid_t;
 typedef unsigned int kgid_t;
 
 typedef unsigned short umode_t;
 
+#define __I_NEW 3
+#define I_NEW (1 << __I_NEW)
+
 struct inode {
+    ino_t i_ino;
     umode_t i_mode;
     unsigned short i_opflags;
     kuid_t i_uid;
     struct super_block *i_sb;
+    const struct inode_operations *i_op;
+    const struct file_operations *i_fop;
     kgid_t i_gid;
     unsigned int i_flags;
     dev_t i_rdev;
@@ -270,7 +360,37 @@ struct inode {
     struct timespec i_mtime;
     struct timespec i_ctime;
     __u32 i_generation;
+    spinlock_t i_lock;
     void *i_private;
+    unsigned long i_state;
+    union {
+        const unsigned int i_nlink;
+        unsigned int __i_nlink;
+    };
+    unsigned long i_blocks;
+};
+
+struct delayed_call {
+    void (*fn)(void *);
+    void *arg;
+};
+
+struct inode_operations {
+    struct dentry *(*lookup)(struct inode *, struct dentry *, unsigned int);
+    const char *(*get_link)(struct dentry *, struct inode *,
+                            struct delayed_call *);
+
+    int (*readlink)(struct dentry *, char __user *, int);
+
+    int (*create)(struct inode *, struct dentry *, umode_t, bool);
+    int (*link)(struct dentry *, struct inode *, struct dentry *);
+    int (*unlink)(struct inode *, struct dentry *);
+    int (*symlink)(struct inode *, struct dentry *, const char *);
+    int (*mkdir)(struct inode *, struct dentry *, umode_t);
+    int (*rmdir)(struct inode *, struct dentry *);
+    int (*mknod)(struct inode *, struct dentry *, umode_t, dev_t);
+    int (*rename)(struct inode *, struct dentry *, struct inode *,
+                  struct dentry *, unsigned int);
 };
 
 static inline void inode_init_once(struct inode *inode) {
@@ -279,6 +399,235 @@ static inline void inode_init_once(struct inode *inode) {
     getrawmonotonic(&inode->i_atime);
     getrawmonotonic(&inode->i_mtime);
     getrawmonotonic(&inode->i_ctime);
+}
+
+static struct dentry *d_alloc(struct dentry *parent, const struct qstr *name) {
+    struct dentry *dentry = kmalloc(sizeof(struct dentry), GFP_KERNEL);
+    memset(dentry, 0, sizeof(*dentry));
+    dentry->d_parent = parent;
+
+    if (unlikely(!name)) {
+        dentry->d_name = slash_name;
+    } else {
+        dentry->d_name = *name;
+    }
+
+    dentry->d_inode = NULL;
+
+    INIT_LIST_HEAD(&dentry->d_subdirs);
+    INIT_HLIST_NODE(&dentry->d_hash);
+
+    return dentry;
+}
+
+static inline void dput(struct dentry *dentry) {
+    if (dentry) {
+        kfree(dentry);
+    }
+}
+
+static inline struct dentry *d_splice_alias(struct inode *inode,
+                                            struct dentry *dentry) {
+    dentry->d_inode = inode;
+    return NULL;
+}
+
+static inline struct inode *alloc_inode(struct super_block *sb) {
+    struct inode *inode = sb->s_op->alloc_inode(sb);
+    if (!inode) {
+        return NULL;
+    }
+
+    memset(inode, 0, sizeof(*inode));
+    spin_lock_init(&inode->i_lock);
+    inode->i_sb = sb;
+    return inode;
+}
+
+static inline struct inode *new_inode(struct super_block *sb) {
+    struct inode *inode;
+
+    inode = alloc_inode(sb);
+    return inode;
+}
+
+static inline void inode_init_owner(struct inode *inode,
+                                    const struct inode *dir, umode_t mode) {
+    // inode_fsuid_set(inode, mnt_userns);
+    if (dir && dir->i_mode & S_ISGID) {
+        inode->i_gid = dir->i_gid;
+
+        /* Directories are special, and always inherit S_ISGID */
+        if (S_ISDIR(mode))
+            mode |= S_ISGID;
+    }
+    // else inode_fsgid_set(inode, mnt_userns);
+    inode->i_mode = mode;
+}
+
+static inline struct timespec current_time(struct inode *inode) {
+    struct timespec now;
+    getrawmonotonic(&now);
+
+    if (unlikely(!inode->i_sb)) {
+        return now;
+    }
+
+    return now;
+}
+
+static inline void d_instantiate(struct dentry *dentry, struct inode *inode) {
+    dentry->d_inode = inode;
+}
+
+static inline struct inode *iget_locked(struct super_block *sb,
+                                        unsigned long ino) {
+    struct inode *inode = alloc_inode(sb);
+
+    spin_lock(&inode->i_lock);
+    // TODO: handle reopen?
+    inode->i_state |= I_NEW;
+    inode->i_ino = ino;
+    return inode;
+}
+
+static inline void inode_has_no_xattr(struct inode *inode) {
+    return;
+}
+
+static inline void unlock_new_inode(struct inode *inode) {
+    spin_unlock(&inode->i_lock);
+}
+
+static inline int insert_inode_locked(struct inode *inode) {
+    // TODO: handle insert?
+    spin_lock(&inode->i_lock);
+    return 0;
+}
+
+/**
+ * set_nlink - directly set an inode's link count
+ * @inode: inode
+ * @nlink: new nlink (should be non-zero)
+ *
+ * This is a low-level filesystem helper to replace any
+ * direct filesystem manipulation of i_nlink.
+ */
+static inline void set_nlink(struct inode *inode, unsigned int nlink) {
+    if (!nlink) {
+        if (inode->i_nlink) {
+            inode->__i_nlink = 0;
+            // atomic_long_inc(&inode->i_sb->s_remove_count);
+        }
+    } else {
+        /* Yes, some filesystems do change nlink from zero to one */
+        // if (inode->i_nlink == 0)
+        //     atomic_long_dec(&inode->i_sb->s_remove_count);
+
+        inode->__i_nlink = nlink;
+    }
+}
+
+static inline void make_bad_inode(struct inode *inode) {
+    inode->i_op = NULL;
+    inode->i_fop = NULL;
+    inode->i_state = 0;
+}
+
+static inline void init_special_inode(struct inode *inode, umode_t mode,
+                                      dev_t rdev) {
+    inode->i_mode = mode;
+    inode->i_rdev = rdev;
+    inode->i_fop = NULL;
+}
+
+static inline void iput(struct inode *inode) {
+    struct super_operations *ops = inode->i_sb->s_op;
+
+    if (ops->evict_inode)
+        ops->evict_inode(inode);
+    // user defined release inode
+    if (ops->destroy_inode)
+        ops->destroy_inode(inode);
+}
+
+static inline void iget_failed(struct inode *inode) {
+    unlock_new_inode(inode);
+    iput(inode);
+}
+
+static inline struct dentry *d_make_root(struct inode *root_inode) {
+    struct dentry *res = NULL;
+    if (root_inode) {
+        res = d_alloc(NULL, NULL);
+        if (res)
+            d_instantiate(res, root_inode);
+        else
+            iput(root_inode);
+    }
+    return res;
+}
+
+static loff_t generic_file_llseek_size(struct file *file, loff_t offset,
+                                       int whence, loff_t maxsize, loff_t eof) {
+    switch (whence) {
+        case SEEK_END:
+            offset += eof;
+            break;
+        case SEEK_CUR:
+            /*
+             * Here we special-case the lseek(fd, 0, SEEK_CUR)
+             * position-querying operation.  Avoid rewriting the "same"
+             * f_pos value back to the file because a concurrent read(),
+             * write() or lseek() might have altered it
+             */
+            if (offset == 0)
+                return file->f_pos;
+            offset += file->f_pos;
+            return offset;
+    }
+    file->f_pos = offset;
+
+    return offset;
+}
+
+static inline loff_t generic_file_llseek(struct file *file, loff_t offset,
+                                         int whence) {
+    struct inode *inode = file->f_inode;
+
+    return generic_file_llseek_size(file, offset, whence, 0, inode->i_size);
+}
+
+/*
+ * Called when an inode is about to be open.
+ * We use this to disallow opening large files on 32bit systems if
+ * the caller didn't specify O_LARGEFILE.  On 64bit systems we force
+ * on this flag in sys_open.
+ */
+static inline int generic_file_open(struct inode *inode, struct file *filp) {
+    return 0;
+}
+
+static inline struct file *alloc_file(const struct path *path, int flags,
+                                      const struct file_operations *fop) {
+    struct file *file;
+
+    file = kmalloc(sizeof(*file), GFP_KERNEL);
+    if (IS_ERR(file))
+        return file;
+
+    file->f_path = *path;
+    file->f_inode = path->dentry->d_inode;
+
+    file->f_op = fop;
+    file->f_pos = 0;
+    return file;
+}
+
+static inline void fput(struct file *file) {
+    if (file) {
+        kfree(file);
+    }
 }
 
 #define schedule() sched_yield()

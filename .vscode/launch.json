@@ -13,6 +13,10 @@
                 {
                     "name": "TARGET_TEST_PROG",
                     "value": "${workspaceFolder}/tests/test"
+                },
+                {
+                    "name": "KILLER_PARAMS",
+                    "value": "init"
                 }
             ],
             "externalConsole": false,
@@ -31,12 +35,12 @@
             "name": "FIO",
             "type": "cppdbg",
             "request": "launch",
-            "program": "/path/to/fio",
+            "program": "/usr/bin/fio",
             "args": [
                 "-filename=\\a",
                 "-fallocate=none",
                 "-direct=0",
-                "-iodepth 1",
+                "-iodepth=1",
                 "-rw=write",
                 "-ioengine=sync",
                 "-bs=4K",
@@ -45,7 +49,16 @@
             ],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
-            "environment": [],
+            "environment": [
+                {
+                    "name": "TARGET_TEST_PROG",
+                    "value": "/usr/bin/fio"
+                },
+                {
+                    "name": "KILLER_PARAMS",
+                    "value": "init"
+                }
+            ],
             "externalConsole": false,
             "MIMode": "gdb",
             "setupCommands": [

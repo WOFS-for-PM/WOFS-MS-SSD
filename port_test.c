@@ -1,5 +1,6 @@
 #include "killer.h"
 #include "tlalloc.h"
+#include "usyscall.h"
 
 #define PORT_TEST_BLOCK_SIZE 4096
 #define PORT_TEST_MTA_SIZE 64
@@ -118,19 +119,19 @@ DEFINE_UNIT_TEST_START(inode_mgr_test) {
     ret = hk_inode_mgr_alloc(mgr, &ino);
     assert(!ret);
     assert(ino != HK_ROOT_INO);
-    assert(ino == 1);
+    assert(ino == HK_RESV_NUM + 1);
 
     // alloc all inodes
-    for (int i = 1; i <= HK_NUM_INO - 2; i++) {
+    for (int i = 1; i < HK_NUM_INO - (HK_RESV_NUM + 1); i++) {
         ret = hk_inode_mgr_alloc(mgr, &ino);
         assert(!ret);
         assert(ino != HK_ROOT_INO);
-        assert(ino == i + 1);
+        assert(ino == i + (HK_RESV_NUM + 1));
     }
 
     // free all inodes
-    for (int i = 0; i <= HK_NUM_INO - 2; i++) {
-        ret = hk_inode_mgr_free(mgr, i + 1);
+    for (int i = 0; i < HK_NUM_INO - (HK_RESV_NUM + 1); i++) {
+        ret = hk_inode_mgr_free(mgr, i + (HK_RESV_NUM + 1));
         assert(!ret);
     }
 
@@ -138,15 +139,22 @@ DEFINE_UNIT_TEST_START(inode_mgr_test) {
     ret = hk_inode_mgr_alloc(mgr, &ino);
     assert(!ret);
     assert(ino != HK_ROOT_INO);
-    assert(ino == 1);
+    assert(ino == HK_RESV_NUM + 1);
 
     hk_inode_mgr_destroy(mgr);
     sbi->inode_mgr = orig_mgr;
 }
 DEFINE_UNIT_TEST_END(inode_mgr_test)
 
+// Before GC
+// | c-cont (1) | dat (1) | d-cont (1) | dat (2) | ... | dat (64) |
+//
+// After GC
+// | c-cont (1) | dat (1) | empty | dat (2) | ... | dat (64) | d-cont (1) |
 DEFINE_UNIT_TEST_START(obj_test) {
     int ret, iter, cpu;
+    in_pkg_param_t in_param;
+    out_pkg_param_t out_param;
 
     // Init super
     struct hk_sb_info *sbi = HK_SB(&sb);
@@ -155,11 +163,24 @@ DEFINE_UNIT_TEST_START(obj_test) {
     struct hk_inode_info_header *sih;
 
     // Create an Inode
+    in_create_pkg_param_t in_create_param;
+    out_create_pkg_param_t out_create_param;
     info->header = hk_alloc_hk_inode_info_header();
     sih = info->header;
     sih->ino = 0;
     hk_init_header(&sb, sih, S_IFREG | 0644);
     sih->si = info;
+
+    in_create_param.create_type = CREATE_FOR_NORMAL;
+    in_create_param.rdev = 0;
+    in_param.bin = false;
+    in_param.private = &in_create_param;
+    in_param.cur_pkg_addr = 0;
+    out_param.private = &out_create_param;
+    create_new_inode_pkg(sbi, S_IFREG, "mock", sih, NULL, &in_param,
+                         &out_param);
+    io_wbinvd(CUR_DEV_HANDLER_PTR(&sb), out_param.addr, MTA_PKG_DATA_SIZE);
+    io_fence(CUR_DEV_HANDLER_PTR(&sb));
 
     // Alloc a block from address space
     struct hk_layout_prep prep;
@@ -168,8 +189,6 @@ DEFINE_UNIT_TEST_START(obj_test) {
 
     // I/O: write data to the block and read it back
     char buf[4096];
-    in_pkg_param_t in_param;
-    out_pkg_param_t out_param;
     size_t written_size = 4096;
     // we test gc functionality (when a meta block is full)
     // it will be inserted to the gc list.
@@ -215,17 +234,10 @@ DEFINE_UNIT_TEST_START(obj_test) {
         offset += written_size;
 
         // flush the metadata block
-        if (is_last_ps_entry(sbi, out_param.addr, MTA_PKG_DATA_SIZE)) {
-            pr_info("flush metadata block @ [0x%llx, 0x%llx)\n",
-                    round_down(out_param.addr, 4096),
-                    round_down(out_param.addr, 4096) + 4096);
-            // Clean metadata cache
-            io_wbinvd(CUR_DEV_HANDLER_PTR(&sb),
-                      round_down(out_param.addr, 4096), 4096);
-            io_fence(CUR_DEV_HANDLER_PTR(&sb));
-        }
+        try_flush_meta_block(sbi, out_param.addr);
     }
 
+    // Start GC
     unsigned long gced = 0;
     for (cpu = 0; cpu < sbi->cpus; cpu++) {
         gced += tlgc(&sbi->layouts[cpu].allocator, 1);
@@ -233,7 +245,7 @@ DEFINE_UNIT_TEST_START(obj_test) {
     assert(gced == 1);
 
     offset = 0;
-    // reread the data
+    // Re-read the data
     for (iter = 0; iter < loop; iter++) {
         memset(buf, 0, written_size);
         obj_ref_data_t *ref = hk_inode_get_slot(sih, offset);
@@ -249,11 +261,84 @@ DEFINE_UNIT_TEST_START(obj_test) {
         offset += written_size;
     }
 
+    // `put_super` free the inode
+    // hk_free_hk_inode_info_header(sih);
     // Destroy the Inode
-    hk_free_hk_inode_info_header(sih);
     hk_sops.destroy_inode(inode);
 }
 DEFINE_UNIT_TEST_END(obj_test)
+
+struct inode_operations vfs_test_dir_iops;
+struct file_operations vfs_test_file_ops;
+// temp determine whether the file "test" is created
+static int created = 0;
+
+static struct dentry *vfs_test_lookup(struct inode *dir, struct dentry *dentry,
+                                      unsigned int flags) {
+    struct inode *inode = NULL;
+    struct super_block *sb = dir->i_sb;
+
+    if (!strcmp((const char *)dentry->d_name.name, "test")) {
+        if (created)
+            inode = iget_locked(sb, 1);
+    }
+
+    return d_splice_alias(inode, dentry);
+}
+
+int vfs_test_create(struct inode *dir, struct dentry *dentry, umode_t mode,
+                    bool excl) {
+    struct inode *inode = NULL;
+    struct super_block *sb = dir->i_sb;
+
+    inode = new_inode(sb);
+    if (!inode) {
+        return -ENOMEM;
+    }
+
+    inode->i_ino = 1;
+    inode->i_op = NULL;
+    inode->i_fop = &vfs_test_file_ops;
+
+    created = 1;
+
+    d_instantiate(dentry, inode);
+    return 0;
+}
+
+struct inode_operations vfs_test_dir_iops = {
+    .lookup = vfs_test_lookup,
+    .create = vfs_test_create,
+};
+
+struct file_operations vfs_test_file_ops = {
+    .llseek = generic_file_llseek,
+};
+
+DEFINE_UNIT_TEST_START(vfs_test) {
+    struct inode *inode = alloc_inode(&sb);
+    struct dentry *orig_root;
+    inode->i_op = &vfs_test_dir_iops;
+    inode->i_mode = S_IFDIR | 0755;
+
+    orig_root = sb.s_root;
+    sb.s_root = d_make_root(inode);
+
+    int fd = usys_open("/tmp/test", O_RDWR, 0644);
+    assert(fd < 0);
+
+    fd = usys_open("/test", O_RDWR, 0644);
+    assert(fd == -ENOENT);
+
+    fd = usys_open("/test", O_CREAT | O_RDWR, 0644);
+    assert(fd >= 0);
+
+    usys_close(fd);
+
+    iput(inode);
+    sb.s_root = orig_root;
+}
+DEFINE_UNIT_TEST_END(vfs_test)
 
 int port_test(void) {
     int ret = 0;
@@ -275,5 +360,10 @@ int port_test(void) {
     // we must GC
     ret = obj_test(NULL);
     assert(!ret);
+
+    // vfs test
+    ret = vfs_test(NULL);
+    assert(!ret);
+
     return ret;
 }

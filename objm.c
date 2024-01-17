@@ -488,7 +488,11 @@ static void claim_req_destroy(claim_req_t *req) {
 int obj_mgr_send_claim_request(obj_mgr_t *mgr, u64 dep_pkg_addr,
                                claim_req_t *req) {
     pendlst_t *pendlst;
+
+#ifdef DEBUG
+    // remove annoying warning
     struct hk_sb_info *sbi = mgr->sbi;
+#endif
 
     bool found = false;
     int slot = hash_min(dep_pkg_addr, HASH_BITS(mgr->pending_table.tbl));
@@ -845,7 +849,10 @@ int ur_dram_latest_inode(obj_mgr_t *mgr, struct hk_inode_info_header *sih,
                          inode_update_t *update) {
     u32 ino = update->ino;
     u64 ps_inode = update->addr;
+
+#ifdef DEBUG
     struct hk_sb_info *sbi = mgr->sbi;
+#endif
 
     if (!sih->latest_fop.latest_inode) {
         sih->latest_fop.latest_inode =
@@ -864,7 +871,9 @@ int ur_dram_latest_inode(obj_mgr_t *mgr, struct hk_inode_info_header *sih,
  */
 int ur_dram_latest_attr(obj_mgr_t *mgr, struct hk_inode_info_header *sih,
                         attr_update_t *update) {
+#ifdef DEBUG
     struct hk_sb_info *sbi = mgr->sbi;
+#endif
     if (!sih->latest_fop.latest_attr) {
         if (update->inline_update) {
             sih->latest_fop.latest_attr = ref_attr_create(
@@ -1081,7 +1090,7 @@ typedef struct fill_attr {
 
 /* used only by internal fill ps */
 #define FILL_ATTR_INIT 0x0000
-#define FILL_ATTR_EXIST 0x0001
+#define FILL_ATTR_FILE 0x0001
 #define FILL_ATTR_TYPE_MASK 0x000F
 #define FILL_ATTR_TYPE(options) (options & FILL_ATTR_TYPE_MASK)
 #define FILL_ATTR_INHERIT 0x8000
@@ -1092,8 +1101,8 @@ typedef struct fill_attr {
 #define IS_FILL_ATTR_LINK_CHANGE(options) (options & FILL_ATTR_LINK_CHANGE)
 #define IS_FILL_ATTR_SIZE_CHANGE(options) (options & FILL_ATTR_SIZE_CHANGE)
 
-void __fill_storage_attr(struct hk_sb_info *sbi, struct hk_obj_attr *attr,
-                         fill_param_t *param) {
+void __fill_ps_attr(struct hk_sb_info *sbi, struct hk_obj_attr *attr,
+                    fill_param_t *param) {
     struct super_block *sb = sbi->sb;
     unsigned long flags = 0;
     u32 ino = param->ino;
@@ -1119,7 +1128,7 @@ void __fill_storage_attr(struct hk_sb_info *sbi, struct hk_obj_attr *attr,
         i_uid = attr_param->uid;
         i_gid = attr_param->gid;
         i_links_count = 1;
-    } else if (FILL_ATTR_TYPE(options) == FILL_ATTR_EXIST) {
+    } else if (FILL_ATTR_TYPE(options) == FILL_ATTR_FILE) {
         struct hk_inode_info_header *sih =
             (struct hk_inode_info_header *)attr_param->inherit;
 
@@ -1252,8 +1261,8 @@ void __assign_unlink_pkg_hdr_param(struct hk_sb_info *sbi,
         pkg_hdr_param->fill_unlink_hdr.psih->i_ctime;
 }
 
-void __fill_storage_pkg_hdr(struct hk_sb_info *sbi, struct hk_pkg_hdr *pkg_hdr,
-                            fill_param_t *param) {
+void __fill_ps_pkg_hdr(struct hk_sb_info *sbi, struct hk_pkg_hdr *pkg_hdr,
+                       fill_param_t *param) {
     fill_pkg_hdr_t *pkg_hdr_param = (fill_pkg_hdr_t *)param->data;
     struct super_block *sb = sbi->sb;
     unsigned long flags = 0;
@@ -1389,20 +1398,21 @@ int create_new_inode_pkg(struct hk_sb_info *sbi, u16 mode, const char *name,
         inode_update.addr = get_ps_offset(sbi, out_param->addr);
         cur_addr += OBJ_INODE_SIZE;
     } else {
-        if (create_type == CREATE_FOR_LINK)
+        if (create_type == CREATE_FOR_LINK) {
             hk_dbg("create new inode pkg, ino: %u (-> %u), addr: 0x%llx, "
                    "offset: 0x%llx\n",
                    ino, orig_ino, out_param->addr,
                    get_ps_offset(sbi, out_param->addr));
-        else if (create_type == CREATE_FOR_SYMLINK)
+        } else if (create_type == CREATE_FOR_SYMLINK) {
             hk_dbg("create new inode pkg, ino: %u (symdata @ 0x%llx), addr: "
                    "0x%llx, offset: 0x%llx\n",
                    ino, in_param->next_pkg_addr, out_param->addr,
                    get_ps_offset(sbi, out_param->addr));
-        else
+        } else {
             hk_dbg(
                 "create new inode pkg, ino: %u, addr: 0x%llx, offset: 0x%llx\n",
                 ino, out_param->addr, get_ps_offset(sbi, out_param->addr));
+        }
         /* fill inode */
         obj_inode = (struct hk_obj_inode *)cur_addr;
         __fill_ps_inode(sbi, obj_inode, ino, rdev, &inode_update);
@@ -1431,7 +1441,7 @@ int create_new_inode_pkg(struct hk_sb_info *sbi, u16 mode, const char *name,
     pkg_hdr_param.fill_create_hdr.psih = psih;
     pkg_hdr_param.fill_create_hdr.sih = sih;
     fill_param.data = &pkg_hdr_param;
-    __fill_storage_pkg_hdr(sbi, pkg_hdr, &fill_param);
+    __fill_ps_pkg_hdr(sbi, pkg_hdr, &fill_param);
 
     cur_addr += OBJ_PKGHDR_SIZE;
 
@@ -1443,9 +1453,17 @@ int create_new_inode_pkg(struct hk_sb_info *sbi, u16 mode, const char *name,
         hk_crc32c(~0, (const u8 *)pkg_buf, MTA_PKG_CREATE_SIZE);
     hk_unlock_range(sbi->sb, (void *)out_param->addr, MTA_PKG_CREATE_SIZE,
                     &flags);
-    /* fence-once */
-    memcpy_to_pmem_nocache((void *)out_param->addr, pkg_buf,
-                           MTA_PKG_CREATE_SIZE);
+    if (sbi->dax) {
+        /* fence-once */
+        memcpy_to_pmem_nocache((void *)out_param->addr, pkg_buf,
+                               MTA_PKG_CREATE_SIZE);
+    } else {
+        io_write(CUR_DEV_HANDLER_PTR(sbi->sb), (off_t)out_param->addr,
+                 (char *)pkg_buf, MTA_PKG_CREATE_SIZE, O_IO_CACHED);
+        io_clwb(CUR_DEV_HANDLER_PTR(sbi->sb), (off_t)out_param->addr,
+                MTA_PKG_CREATE_SIZE);
+        io_fence(CUR_DEV_HANDLER_PTR(sbi->sb));
+    }
     hk_lock_range(sbi->sb, (void *)out_param->addr, MTA_PKG_CREATE_SIZE,
                   &flags);
 
@@ -1462,13 +1480,13 @@ int create_new_inode_pkg(struct hk_sb_info *sbi, u16 mode, const char *name,
         attr_param.time = sih->i_ctime;
         attr_param.gid = sih->i_gid;
         attr_param.uid = sih->i_uid;
-        attr_param.options = FILL_ATTR_EXIST | FILL_ATTR_INHERIT;
+        attr_param.options = FILL_ATTR_FILE | FILL_ATTR_INHERIT;
         attr_param.inherit = sih;
         attr_param.update = &attr_update;
 
         fill_param.ino = ino;
         fill_param.data = &attr_param;
-        __fill_storage_attr(sbi, NULL, &fill_param);
+        __fill_ps_attr(sbi, NULL, &fill_param);
     } else {
         /* fill pseudo attr in DRAM for further update, but do not allocate in
          * PM */
@@ -1486,7 +1504,7 @@ int create_new_inode_pkg(struct hk_sb_info *sbi, u16 mode, const char *name,
             fill_param.ino = ino;
 
         fill_param.data = &attr_param;
-        __fill_storage_attr(sbi, NULL, &fill_param);
+        __fill_ps_attr(sbi, NULL, &fill_param);
     }
 
     /* fill pseudo parent attr in DRAM for further update, but do not allocate
@@ -1494,13 +1512,13 @@ int create_new_inode_pkg(struct hk_sb_info *sbi, u16 mode, const char *name,
     /* if it is root inode, there is no parent inode */
     if (psih) {
         attr_param.options =
-            FILL_ATTR_EXIST | (FILL_ATTR_LINK_CHANGE | FILL_ATTR_SIZE_CHANGE);
+            FILL_ATTR_FILE | (FILL_ATTR_LINK_CHANGE | FILL_ATTR_SIZE_CHANGE);
         attr_param.link_change = 1;
         attr_param.size_change = OBJ_DENTRY_SIZE;
         attr_param.inherit = psih;
         attr_param.update = &pattr_update;
         fill_param.data = &attr_param;
-        __fill_storage_attr(sbi, NULL, &fill_param);
+        __fill_ps_attr(sbi, NULL, &fill_param);
     }
 
     /* update attr_update/pattr_update addr */
@@ -1553,7 +1571,7 @@ int create_unlink_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
     obj_mgr_t *obj_mgr = sbi->obj_mgr;
     attr_update_t pattr_update;
     fill_param_t fill_param;
-    u64 cur_addr;
+    u64 cur_addr, start_addr;
     u64 dep_ofs;
     int ret;
     INIT_TIMING(time);
@@ -1571,7 +1589,15 @@ int create_unlink_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
         }
     }
 
-    cur_addr = out_param->addr;
+    if (sbi->dax) {
+        cur_addr = out_param->addr;
+    } else {
+        // do not access data, data is only an offset
+        char pkg_buf[MTA_PKG_UNLINK_SIZE];
+        cur_addr = (u64)pkg_buf;
+    }
+    start_addr = cur_addr;
+
     dep_ofs = sih->latest_fop.latest_inode->hdr.addr;
 
     /* fill pkg hdr */
@@ -1587,17 +1613,17 @@ int create_unlink_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
     pkg_hdr_param.fill_unlink_hdr.dep_ofs = dep_ofs;
     pkg_hdr_param.fill_unlink_hdr.unlinked_ino = sih->ino;
     fill_param.data = &pkg_hdr_param;
-    __fill_storage_pkg_hdr(sbi, pkg_hdr, &fill_param);
+    __fill_ps_pkg_hdr(sbi, pkg_hdr, &fill_param);
     cur_addr += OBJ_PKGHDR_SIZE;
 
     /* flush + fence-once to commit the package */
-    commit_pkg(sbi, (void *)(out_param->addr), (void *)(out_param->addr),
+    commit_pkg(sbi, (void *)(out_param->addr), (void *)start_addr,
                cur_addr - out_param->addr, &pkg_hdr->hdr);
 
     /* fill pseudo parent attr to prevent in-PM allocation */
     fill_attr_t attr_param = {
         .options =
-            FILL_ATTR_EXIST | (FILL_ATTR_SIZE_CHANGE | FILL_ATTR_LINK_CHANGE),
+            FILL_ATTR_FILE | (FILL_ATTR_SIZE_CHANGE | FILL_ATTR_LINK_CHANGE),
         .inherit = psih,
         .update = &pattr_update,
     };
@@ -1605,7 +1631,7 @@ int create_unlink_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
     attr_param.size_change = (int)-OBJ_DENTRY_SIZE;
     fill_param.ino = psih->ino;
     fill_param.data = &attr_param;
-    __fill_storage_attr(sbi, NULL, &fill_param);
+    __fill_ps_attr(sbi, NULL, &fill_param);
 
     /* handle dram updates */
     pattr_update.from_pkg = PKG_UNLINK;
@@ -1667,7 +1693,7 @@ int create_data_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
                     u64 data_addr, off_t offset, size_t size, u64 num,
                     in_pkg_param_t *in_param, out_pkg_param_t *out_param) {
     obj_mgr_t *obj_mgr = sbi->obj_mgr;
-    struct hk_obj_data *data, *p;
+    struct hk_obj_data *data, *cur_addr, *start_addr;
     data_update_t data_update;
     size_t size_after_write =
         offset + size > sih->i_size ? offset + size : sih->i_size;
@@ -1686,31 +1712,33 @@ int create_data_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
 
     data = (struct hk_obj_data *)(out_param->addr);
     if (sbi->dax) {
-        p = data;
+        cur_addr = data;
     } else {
         // do not access data, data is only an offset
-        char buf[OBJ_DATA_SIZE];
-        p = (struct hk_obj_data *)buf;
+        char pkg_buf[OBJ_DATA_SIZE];
+        cur_addr = (struct hk_obj_data *)pkg_buf;
     }
+    start_addr = cur_addr;
 
-    p->ino = sih->ino;
-    p->blk = blk;
-    p->ofs = offset;
-    p->num = num;
-    p->i_cmtime = sih->i_ctime;
-    p->i_size = size_after_write;
+    cur_addr->ino = sih->ino;
+    cur_addr->blk = blk;
+    cur_addr->ofs = offset;
+    cur_addr->num = num;
+    cur_addr->i_cmtime = sih->i_ctime;
+    cur_addr->i_size = size_after_write;
     if (in_param->bin) {
-        __fill_ps_obj_hdr(sbi, &p->hdr,
+        __fill_ps_obj_hdr(sbi, &cur_addr->hdr,
                           ((u32)in_param->bin_type << 16) | OBJ_DATA);
     } else {
-        __fill_ps_obj_hdr(sbi, &p->hdr, OBJ_DATA);
+        __fill_ps_obj_hdr(sbi, &cur_addr->hdr, OBJ_DATA);
     }
 
     if (unlikely(size < HK_BLK_SZ)) {
         sfence();
     }
     /* flush + fence-once to commit the package */
-    commit_pkg(sbi, (void *)(out_param->addr), p, OBJ_DATA_SIZE, &p->hdr);
+    commit_pkg(sbi, (void *)(out_param->addr), start_addr, OBJ_DATA_SIZE,
+               &cur_addr->hdr);
 
     /* NOTE: prevent read after persist  */
     data_update.build_from_exist = false;
@@ -1735,6 +1763,7 @@ int create_attr_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
                     out_pkg_param_t *out_param) {
     obj_mgr_t *obj_mgr = sbi->obj_mgr;
     struct hk_obj_attr *attr;
+    u64 start_addr, cur_addr;
     fill_attr_t attr_param;
     fill_param_t fill_param;
     attr_update_t attr_update;
@@ -1746,17 +1775,26 @@ int create_attr_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
         goto out;
     }
 
-    attr = (struct hk_obj_attr *)(out_param->addr);
+    if (sbi->dax) {
+        cur_addr = out_param->addr;
+    } else {
+        // do not access data, data is only an offset
+        char pkg_buf[OBJ_ATTR_SIZE];
+        cur_addr = (u64)pkg_buf;
+    }
+    start_addr = cur_addr;
+
+    attr = (struct hk_obj_attr *)cur_addr;
     attr_param.options =
-        FILL_ATTR_EXIST | (FILL_ATTR_SIZE_CHANGE | FILL_ATTR_LINK_CHANGE);
+        FILL_ATTR_FILE | (FILL_ATTR_SIZE_CHANGE | FILL_ATTR_LINK_CHANGE);
     attr_param.inherit = sih;
     attr_param.size_change = size_change;
     attr_param.link_change = link_change;
     attr_param.update = &attr_update;
     fill_param.ino = sih->ino;
     fill_param.data = &attr_param;
-    __fill_storage_attr(sbi, attr, &fill_param);
-    commit_pkg(sbi, (void *)(out_param->addr), (void *)(out_param->addr),
+    __fill_ps_attr(sbi, attr, &fill_param);
+    commit_pkg(sbi, (void *)(out_param->addr), (void *)start_addr,
                OBJ_ATTR_SIZE, &attr->hdr);
 
     attr_update.from_pkg = PKG_ATTR;

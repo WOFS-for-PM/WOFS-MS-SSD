@@ -30,6 +30,8 @@ extern void *kmem_cache_zalloc(struct kmem_cache *cachep, gfp_t flags);
 
 extern void kmem_cache_free(struct kmem_cache *cachep, void *objp);
 
+extern char *kmemdup_nul(const char *s, size_t len, gfp_t gfp);
+
 #if 1
 extern void *kmalloc(size_t size, gfp_t flags);
 #define kvmalloc kmalloc

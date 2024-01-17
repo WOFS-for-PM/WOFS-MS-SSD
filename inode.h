@@ -25,6 +25,13 @@ static inline struct hk_inode_info_header *HK_IH(struct inode *inode) {
     return si->header;
 }
 
+enum hk_new_inode_type {
+    TYPE_CREATE = 0,
+    TYPE_MKNOD,
+    TYPE_SYMLINK,
+    TYPE_MKDIR
+};
+
 /*
  * hk-specific inode state kept in DRAM
  */

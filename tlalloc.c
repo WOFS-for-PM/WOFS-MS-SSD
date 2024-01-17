@@ -1279,14 +1279,11 @@ unsigned long tlgc(tl_allocator_t *alloc, unsigned long max) {
     meta_mgr_t *meta_mgr = &alloc->meta_manager;
     typed_meta_mgr_t *tmeta_mgr;
     struct list_head *pend_list, victim_list;
-    victim_node_t *pos, *n;
     tl_node_t *node;
     struct rb_node *tmp;
     unsigned long gced = 0;
-    int m_alloc_type_idx = 0, ret, i;
+    int m_alloc_type_idx = 0, ret;
     u64 blks_to_reserve = 0, blks_to_reclaim = 0, blks_remain = 0;
-    u32 entry_size;
-    u64 entries_perblk;
 
     if (IF_ALLOC_IPU(alloc)) {
         return 0;
@@ -1296,8 +1293,6 @@ unsigned long tlgc(tl_allocator_t *alloc, unsigned long max) {
     while (max) {
         tmeta_mgr = &meta_mgr->tmeta_mgrs[m_alloc_type_idx];
         pend_list = &tmeta_mgr->pend_list;
-        entry_size = meta_type_to_idx(m_alloc_type_idx);
-        entries_perblk = HK_BLK_SZ / entry_size;
 
         // frozen alloc
         spin_lock(&data_mgr->spin);

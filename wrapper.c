@@ -5,60 +5,10 @@
 
 #include "glibc/ffile.h"
 #include "killer.h"
+#include "usyscall.h"
+#include "utils/parser.h"
 
-static struct kmem_cache *hk_inode_cachep;
-
-static void init_once(void *foo) {
-    struct hk_inode_info *vi = foo;
-
-    inode_init_once(&vi->vfs_inode);
-}
-
-static int __init init_inodecache(void) {
-    hk_inode_cachep =
-        kmem_cache_create("hk_inode_cache", sizeof(struct hk_inode_info), 0,
-                          (SLAB_RECLAIM_ACCOUNT | SLAB_MEM_SPREAD), init_once);
-    if (hk_inode_cachep == NULL)
-        return -ENOMEM;
-    return 0;
-}
-
-static void destroy_inodecache(void) {
-    /*
-     * Make sure all delayed rcu free inodes are flushed before
-     * we destroy cache.
-     */
-    if (hk_inode_cachep) {
-        kmem_cache_destroy(hk_inode_cachep);
-        hk_inode_cachep = NULL;
-    }
-}
-
-static struct inode *hk_alloc_inode(struct super_block *sb) {
-    struct hk_inode_info *vi;
-
-    vi = kmem_cache_alloc(hk_inode_cachep, GFP_NOFS);
-    if (!vi)
-        return NULL;
-
-    vi->header = NULL;
-
-    return &vi->vfs_inode;
-}
-
-static void hk_destroy_inode(struct inode *inode) {
-    struct hk_inode_info *vi = HK_I(inode);
-
-    kmem_cache_free(hk_inode_cachep, vi);
-}
-
-struct super_operations hk_sops = {
-    .alloc_inode = hk_alloc_inode,
-    .destroy_inode = hk_destroy_inode,
-    .evict_inode = NULL,
-};
-
-// #define WRAPPER_DEBUG
+#define WRAPPER_DEBUG
 
 #ifdef WRAPPER_DEBUG
 #define PRINT_FUNC pr_info("\tcalled KILLER func: %s\n", __func__)
@@ -382,12 +332,9 @@ struct super_operations hk_sops = {
 #define INTF_SYMLINKAT const char *old_path, int newdirfd, const char *new_path
 #define INTF_MKDIRAT int dirfd, const char *path, mode_t mode
 
-#define KILLER_ALL_OPS                                                         \
-    (OPEN)(OPEN64)(OPENAT)(CREAT)(CLOSE)(ACCESS)(SEEK)(TRUNC)(FTRUNC)(LINK)(   \
-        UNLINK)(FSYNC)(READ)(WRITE)(PREAD)(PREAD64)(PWRITE)(PWRITE64)(XSTAT)(  \
-        XSTAT64)(RENAME)(MKDIR)(RMDIR)(FSTATFS)(FDATASYNC)(FCNTL)(FADVISE)(    \
-        OPENDIR)(CLOSEDIR)(READDIR)(READDIR64)(SYNC_FILE_RANGE)(FOPEN)( \
-        FPUTS)(FGETS)(FWRITE)(FREAD)(FCLOSE)(FSEEK)(FFLUSH)
+#define KILLER_ALL_OPS \
+    (OPEN)(            \
+        OPEN64)(OPENAT)(CREAT)(CLOSE)(ACCESS)(SEEK)(TRUNC)(FTRUNC)(LINK)(UNLINK)(FSYNC)(READ)(WRITE)(PREAD)(PREAD64)(PWRITE)(PWRITE64)(XSTAT)(XSTAT64)(RENAME)(MKDIR)(RMDIR)(FSTATFS)(FDATASYNC)(FCNTL)(FADVISE)(OPENDIR)(CLOSEDIR)(READDIR)(READDIR64)(SYNC_FILE_RANGE)(FOPEN)(FPUTS)(FGETS)(FWRITE)(FREAD)(FCLOSE)(FSEEK)(FFLUSH)
 
 #define PREFIX(call) (real_##call)
 
@@ -446,7 +393,7 @@ OP_DEFINE_SAFE(OPEN, {
                 p++;
                 *p = '/';
             }
-            ret = hk_open(p, oflag, mode);
+            ret = usys_open(p, oflag, mode);
             if (ret == -1 && *path != '\\') {
                 return real_ops.OPEN(path, oflag, mode);
             }
@@ -454,7 +401,7 @@ OP_DEFINE_SAFE(OPEN, {
 #ifdef WRAPPER_DEBUG
             pr_info("\t\tpath: %s\n", path);
 #endif
-            ret = hk_open((*path == '\\') ? path + 1 : path, oflag);
+            ret = usys_open((*path == '\\') ? path + 1 : path, oflag);
             if (ret == -1 && *path != '\\') {
                 return real_ops.OPEN(path, oflag);
             }
@@ -504,15 +451,15 @@ OP_DEFINE_SAFE(OPENAT, {
             va_start(ap, oflag);
             mode = va_arg(ap, mode_t);
             PRINT_FUNC;
-            ret = hk_openat(dirfd - HK_FD_OFFSET,
-                            (*path == '\\') ? path + 1 : path, oflag, mode);
+            ret = usys_openat(dirfd - HK_FD_OFFSET,
+                              (*path == '\\') ? path + 1 : path, oflag, mode);
             if (ret == -1 && *path != '\\') {
                 return real_ops.OPENAT(dirfd, path, oflag, mode);
             }
         } else {
             PRINT_FUNC;
-            ret = hk_openat(dirfd - HK_FD_OFFSET,
-                            (*path == '\\') ? path + 1 : path, oflag);
+            ret = usys_openat(dirfd - HK_FD_OFFSET,
+                              (*path == '\\') ? path + 1 : path, oflag);
             if (ret == -1 && *path != '\\') {
                 return real_ops.OPENAT(dirfd, path, oflag);
             }
@@ -537,7 +484,7 @@ OP_DEFINE_SAFE(OPENAT, {
 OP_DEFINE_SAFE(WRITE, {
     if (file >= HK_FD_OFFSET) {
         PRINT_FUNC;
-        return hk_write(file - HK_FD_OFFSET, buf, length);
+        return usys_write(file - HK_FD_OFFSET, buf, length);
     } else {
         return real_ops.WRITE(file, buf, length);
     }
@@ -573,7 +520,7 @@ OP_DEFINE_SAFE(XSTAT64, {
 OP_DEFINE_SAFE(CLOSE, {
     PRINT_FUNC;
     if (file >= HK_FD_OFFSET) {
-        return hk_close(file - HK_FD_OFFSET);
+        return usys_close(file - HK_FD_OFFSET);
     } else {
         pr_info("real_ops.CLOSE(%d)\n", file);
         return real_ops.CLOSE(file);
@@ -671,28 +618,8 @@ static inline int get_prog_name(char *prog) {
     return 0;
 }
 
-static int __init hk_create_slab_caches(void) {
-    init_inodecache();
-    init_obj_ref_inode_cache();
-    init_obj_ref_attr_cache();
-    init_obj_ref_dentry_cache();
-    init_obj_ref_data_cache();
-    init_claim_req_cache();
-    init_hk_inode_info_header_cache();
-    init_tl_node_cache();
-    return 0;
-}
-
-void hk_destory_slab_caches(void) {
-    destroy_inodecache();
-    destroy_obj_ref_inode_cache();
-    destroy_obj_ref_attr_cache();
-    destroy_obj_ref_dentry_cache();
-    destroy_obj_ref_data_cache();
-    destroy_claim_req_cache();
-    destroy_hk_inode_info_header_cache();
-    destroy_tl_node_cache();
-}
+extern int init_hk_fs(void);
+extern void exit_hk_fs(void);
 
 static int inited = 0;
 static __attribute__((constructor(101))) void killer_init(void) {
@@ -721,17 +648,25 @@ static __attribute__((constructor(101))) void killer_init(void) {
     signal(SIGINT, err_handler);
 
     if (real_ops.OPEN != 0) {
-        hk_create_slab_caches();
-        
+        char *data = getenv("KILLER_PARAMS");
+
+        pr_info("KILLER_PARAMS: %s\n", data);
+
+        // Init super block and file table stuff
+        usys_init();
+
+        init_hk_fs();
         // pr_info("Checking I/O engine...\n");
         // assert(!io_test());
         // pr_info("I/O engine is ready.\n");
 
-        hk_fill_super(&sb, NULL, 0);
+        hk_fill_super(&sb, data, 0);
 
+#ifdef DEBUG
         pr_info("Checking KILLER porting...\n");
         assert(!port_test());
         pr_info("KILLER porting is ready.\n");
+#endif
 
         pr_info("KILLER initialized in CPU %d.\n", smp_processor_id());
         pr_info("Now the program [%s] begins.\n", prog);
@@ -757,6 +692,6 @@ static __attribute__((destructor)) void killer_destroy(void) {
     if (measure_timing)
         hk_show_stats();
     hk_put_super(&sb);
-    hk_destory_slab_caches();
+
     pr_info("KILLER unloaded.\n");
 }

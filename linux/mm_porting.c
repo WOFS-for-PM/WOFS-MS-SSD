@@ -100,3 +100,12 @@ void *kvcalloc(size_t n, size_t size, gfp_t flags) {
     }
     return p;
 }
+
+char *kmemdup_nul(const char *s, size_t len, gfp_t gfp) {
+    char *p = __malloc__(len + 1);
+    if (p) {
+        memcpy(p, s, len);
+        p[len] = '\0';
+    }
+    return p;
+}

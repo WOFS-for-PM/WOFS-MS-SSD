@@ -120,4 +120,6 @@
 #define CACHELINE_MASK (~(CACHELINE_SIZE - 1))
 #define CACHELINE_ALIGN(addr) (((addr) + CACHELINE_SIZE - 1) & CACHELINE_MASK)
 
+#define READDIR_END (ULONG_MAX)
+
 #endif

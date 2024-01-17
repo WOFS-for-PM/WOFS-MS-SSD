@@ -8,12 +8,13 @@
 #include <sys/types.h>
 
 #include "../killer.h"
+#include "../usyscall.h"
 
-#define __open hk_open
-#define __close hk_close
-#define __read hk_read
-#define __write hk_write
-#define __lseek hk_lseek
+#define __open usys_open
+#define __close usys_close
+#define __read usys_read
+#define __write usys_write
+#define __lseek usys_lseek
 
 // MODE NOT STORED YET, need to do if necessary
 

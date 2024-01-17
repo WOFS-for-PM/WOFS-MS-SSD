@@ -16,6 +16,33 @@ typedef struct hk_dev {
     struct thread_data *tds;
 } hk_dev_t;
 
+struct hk_super_block {
+    /* static fields. they never change after file system creation.
+     * checksum only validates up to s_start_dynamic field below
+     */
+    __le32 s_sum;   /* checksum of this sb plus private data appended at the end
+                       of this sb */
+    __le32 s_magic; /* magic signature */
+    __le32 s_padding32;
+    __le32 s_blocksize;     /* blocksize in bytes */
+    __le64 s_size;          /* total size of fs in bytes */
+    char s_volume_name[16]; /* volume name */
+
+    /* all the dynamic fields should go here */
+    /* s_mtime and s_wtime should be together and their order should not be
+     * changed. we use an 8 byte write to update both of them atomically
+     */
+    __le32 s_mtime; /* mount time */
+    __le32 s_wtime; /* write time */
+
+    __le32 s_last_layout;  /* 0 for lfs, 1 for local, 2 for pack, cannot be
+                              changed now */
+    __le32 s_valid_umount; /* is valid umount ? */
+
+    __le64 s_vtail;
+
+} __attribute((__packed__));
+
 /*
  * hk super-block data in DRAM
  */

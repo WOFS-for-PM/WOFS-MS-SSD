@@ -12,9 +12,9 @@ LIB_DIR := $(shell pwd)
 
 LIB_FILES := $(shell find $(LIB_DIR) -maxdepth 1 -name "*.c" )
 LIB_FILES += $(shell find $(LIB_DIR)/backend -name "*.c")
+LIB_FILES += $(shell find $(LIB_DIR)/utils -name "*.c")
 
 LIB_OBJS := $(patsubst $(LIB_DIR)/%.c,$(BUILD_DIR)/%.o,$(LIB_FILES))
-
 
 K_FILES := $(shell find $(LIB_DIR) -maxdepth 1 -name "*.c")
 K_OBJS := $(patsubst $(LIB_DIR)/%.c,%.o,$(K_FILES))
@@ -22,6 +22,7 @@ K_OBJS := $(patsubst $(LIB_DIR)/%.c,%.o,$(K_FILES))
 # Filters out the user-space files
 K_OBJS := $(filter-out port_test.o, $(K_OBJS))
 K_OBJS := $(filter-out wrapper.o, $(K_OBJS))
+K_OBJS := $(filter-out syscall.o, $(K_OBJS))
 
 obj-m += killer.o
 killer-y := $(K_OBJS)

@@ -6,10 +6,21 @@
 #ifndef __KERNEL__
 #include "./backend/common.h"
 #include "./linux/linux_port.h"
+#include "./utils/parser.h"
 
 int port_test(void);
 
 #endif
+
+/* Flags that should be inherited by new inodes from their parent. */
+#define HK_FL_INHERITED                                                   \
+    (FS_SECRM_FL | FS_UNRM_FL | FS_COMPR_FL | FS_SYNC_FL | FS_NODUMP_FL | \
+     FS_NOATIME_FL | FS_COMPRBLK_FL | FS_NOCOMP_FL | FS_JOURNAL_DATA_FL | \
+     FS_NOTAIL_FL | FS_DIRSYNC_FL)
+/* Flags that are appropriate for regular files (all but dir-specific ones). */
+#define HK_REG_FLMASK (~(FS_DIRSYNC_FL | FS_TOPDIR_FL))
+/* Flags that are appropriate for non-directories/regular files. */
+#define HK_OTHER_FLMASK (FS_NODUMP_FL | FS_NOATIME_FL)
 
 /*
  * Debug code
@@ -35,11 +46,15 @@ int port_test(void);
         pr_error("cpu-%d: "s, smp_processor_id(), ##args); \
         BUG_ON(1);                                         \
     } while (0);
-
 #define hk_notimpl(s, args...)                               \
     do {                                                     \
         pr_warn("%s: not implemented: "s, __func__, ##args); \
         assert(0);                                           \
+    } while (0)
+#define HK_ASSERT(x)                                                         \
+    do {                                                                     \
+        if (!(x))                                                            \
+            hk_warn("assertion failed %s:%d: %s\n", __FILE__, __LINE__, #x); \
     } while (0)
 
 #define clear_opt(o, opt) (o &= ~KILLER_MOUNT_##opt)
@@ -51,6 +66,9 @@ int port_test(void);
 #define TRANS_OFS_TO_ADDR(sbi, ofs) \
     (ofs == 0 ? 0 : ((u64)(ofs) + (sbi)->virt_addr))
 #define GET_ALIGNED_BLKNR(ofs_addr) ((ofs_addr) >> KILLER_BLK_SHIFT)
+
+#define S_IFPSEUDO 0xFFFF
+#define S_ISPSEUDO(mode) (mode == S_IFPSEUDO)
 
 /* ======================= ANCHOR: Global values ========================= */
 extern int measure_timing;
@@ -69,92 +87,30 @@ extern int wprotect;
 
 #define KILLER_O_ATOMIC 010
 
-#ifndef __KERNEL__
-void print_debug(int fd);
-
-int *hk_errno();
-
-int hk_mkfs(int flag);
-
-int hk_init(int flag);
-
-int hk_mkdir(const char *pathname, uint16_t mode);
-
-int hk_stat(const char *pathname, struct stat *buf);  // TODO
-
-int hk_fstat(int fd, struct stat *buf);  // TODO
-
-// int  hk_fstat64 (int fd, struct stat64 *buf);
-
-int hk_lstat(const char *pathname, struct stat *buf);  // TODO
-
-int hk_statvfs(const char *path, struct statvfs *buf);  // TODO
-
-int hk_fstatvfs(int fd, struct statvfs *buf);  // TODO
-
-int hk_fstatfs(int fd, struct statfs *buf);  // ******
-
-int hk_truncate(const char *path, off_t length);
-
-int hk_ftruncate(int fd, off_t len);
-
-int hk_open(const char *pathname, int flags, ...);
-
-int hk_openat(int dirfd, const char *pathname, int flags, ...);
-
-int hk_creat(const char *pathname, uint16_t mode);
-
-int hk_close(int fd);
-
-ssize_t hk_write(int fd, const void *buf, size_t count);
-
-ssize_t hk_pwrite(int fd, const void *buf, size_t count, off_t offset);
-
-ssize_t hk_read(int fd, void *buf, size_t count);
-
-ssize_t hk_pread(int fd, void *buf, size_t count, off_t offset);
-
-int hk_link(const char *oldpath, const char *newpath);  // TODO
-
-int hk_unlink(const char *pathname);  // TODO
-
-int hk_rmdir(const char *pathname);  // TODO
-
-int hk_rename(const char *oldpath, const char *newpath);  // ******
-
-DIR *hk_opendir(const char *_pathname);  // ******
-
-struct dirent *hk_readdir(DIR *dirp);  // ******
-
-int hk_closedir(DIR *dirp);  // ******
-
-int hk_chdir(const char *path);  // TODO
-
-char *hk_getcwd(char *buf, int size);  // TODO
-
-int hk_lseek(int fd, int offset, int whence);  // ******
-
-int hk_access(const char *pathname, int mode);  // ******
-
-int hk_fcntl(int fd, int cmd, ...);  // ******
-#endif
-
 /* ======================= ANCHOR: inode.c ========================= */
 // extern const struct address_space_operations hk_aops_dax;
 // void hk_init_inode(struct inode *inode, struct hk_inode *pi);
 // int hk_init_free_inode_list(struct super_block *sb, bool is_init);
 // int hk_init_free_inode_list_percore(struct super_block *sb, int cpuid, bool
 // is_init);
+int hk_inode_mgr_prefault(struct hk_sb_info *sbi, hk_inode_mgr_t *mgr);
 int hk_inode_mgr_init(struct hk_sb_info *sbi, hk_inode_mgr_t *mgr);
 int hk_inode_mgr_alloc(hk_inode_mgr_t *mgr, u32 *ret_ino);
 int hk_inode_mgr_free(hk_inode_mgr_t *mgr, u32 ino);
 int hk_inode_mgr_destroy(hk_inode_mgr_t *mgr);
 int hk_inode_mgr_restore(hk_inode_mgr_t *mgr, u32 ino);
 // struct inode *hk_iget_opened(struct super_block *sb, unsigned long ino);
-// struct inode *hk_iget(struct super_block *sb, unsigned long ino);
+struct inode *hk_iget(struct super_block *sb, unsigned long ino);
 void *hk_inode_get_slot(struct hk_inode_info_header *sih, u64 offset);
+struct inode *hk_create_inode(enum hk_new_inode_type type, struct inode *dir,
+                              u64 ino, umode_t mode, size_t size, dev_t rdev,
+                              const struct qstr *qstr);
 void hk_init_header(struct super_block *sb, struct hk_inode_info_header *sih,
                     u16 i_mode);
+
+/* ======================= ANCHOR: namei.c ========================= */
+extern const struct inode_operations hk_dir_inode_operations;
+extern const struct inode_operations hk_special_inode_operations;
 
 /* ======================= ANCHOR: bbuild.c ========================= */
 unsigned long hk_get_bm_size(struct super_block *sb);
@@ -174,6 +130,16 @@ int hk_alloc_blocks(struct super_block *sb, unsigned long *blks, bool zero,
                     struct hk_layout_prep *prep);
 // int hk_release_layout(struct super_block *sb, int cpuid, u64 blks,
 //                       bool rls_all);
+
+/* ======================= ANCHOR: file.c ========================= */
+extern const struct inode_operations hk_file_inode_operations;
+extern const struct file_operations hk_file_operations;
+
+/* ======================= ANCHOR: dir.c ========================= */
+extern const struct file_operations hk_dir_operations;
+
+/* ======================= ANCHOR: symlink.c ========================= */
+extern const struct inode_operations hk_symlink_inode_operations;
 
 /* ======================= ANCHOR: objm.c ========================= */
 obj_ref_inode_t *ref_inode_create(obj_mgr_t *mgr, u64 addr, u32 ino);
@@ -385,10 +351,40 @@ static u64 inline is_last_ps_entry(struct hk_sb_info *sbi, u64 addr,
     return ((addr + entry_size) & (KILLER_BLK_SIZE - 1)) == 0;
 }
 
+static void inline try_flush_meta_block(struct hk_sb_info *sbi,
+                                        u64 last_entry_addr) {
+    struct super_block *sb = sbi->sb;
+    if (sbi->dax) {
+        // TODO
+        /* Do nothing Now */
+    } else {
+        if (is_last_ps_entry(sbi, last_entry_addr, MTA_PKG_DATA_SIZE)) {
+            pr_warn("flush metadata block @ [0x%llx, 0x%llx)\n",
+                    round_down(last_entry_addr, 4096),
+                    round_down(last_entry_addr, 4096) + 4096);
+            // Clean metadata cache
+            io_wbinvd(CUR_DEV_HANDLER_PTR(sb),
+                      round_down(last_entry_addr, 4096), 4096);
+            io_fence(CUR_DEV_HANDLER_PTR(sb));
+        }
+    }
+}
+
 static inline struct tl_allocator *get_tl_allocator(struct hk_sb_info *sbi,
                                                     u64 offset) {
     u64 idx = get_layout_idx(sbi, offset);
     return &sbi->layouts[idx].allocator;
+}
+
+/* Mask out flags that are inappropriate for the given type of inode. */
+static inline __le32 hk_mask_flags(umode_t mode, __le32 flags) {
+    flags &= HK_FL_INHERITED;
+    if (S_ISDIR(mode))
+        return flags;
+    else if (S_ISREG(mode))
+        return flags & HK_REG_FLMASK;
+    else
+        return flags & HK_OTHER_FLMASK;
 }
 
 static inline void hk_flush_buffer(void *buf, uint32_t len, bool fence) {
