@@ -44,6 +44,8 @@
 #include "./rbtree.h"
 #include "./sort.h"
 
+#define access_ok(addr, size) 1
+
 // Basic types
 typedef __u8 u8;
 typedef __u16 u16;
@@ -197,6 +199,7 @@ static inline s64 atomic64_read(const atomic64_t *v) {
 
 typedef pthread_spinlock_t spinlock_t;
 typedef pthread_mutex_t mutex_t;
+typedef pthread_rwlock_t rw_semaphore_t;
 
 #define mutex_init(mutex) pthread_mutex_init((mutex), NULL)
 #define mutex_lock(mutex) pthread_mutex_lock((mutex))
@@ -207,6 +210,12 @@ typedef pthread_mutex_t mutex_t;
 #define spin_lock(lock) pthread_spin_lock((lock))
 #define spin_unlock(lock) pthread_spin_unlock((lock))
 #define spin_trylock(lock) pthread_spin_trylock((lock))
+
+#define init_rwsem(sem) pthread_rwlock_init((sem), NULL)
+#define down_read(sem) pthread_rwlock_rdlock((sem))
+#define down_write(sem) pthread_rwlock_wrlock((sem))
+#define up_read(sem) pthread_rwlock_unlock((sem))
+#define up_write(sem) pthread_rwlock_unlock((sem))
 
 struct task_struct {
     struct list_head list;
@@ -294,6 +303,7 @@ struct path {
 struct file {
     struct path f_path;
     struct inode *f_inode; /* cached value */
+    unsigned int f_flags;
     const struct file_operations *f_op;
     loff_t f_pos;
     void *private_data;
@@ -363,6 +373,7 @@ struct inode {
     spinlock_t i_lock;
     void *i_private;
     unsigned long i_state;
+    rw_semaphore_t i_rwsem;
     union {
         const unsigned int i_nlink;
         unsigned int __i_nlink;
@@ -440,6 +451,7 @@ static inline struct inode *alloc_inode(struct super_block *sb) {
 
     memset(inode, 0, sizeof(*inode));
     spin_lock_init(&inode->i_lock);
+    init_rwsem(&inode->i_rwsem);
     inode->i_sb = sb;
     return inode;
 }
@@ -449,6 +461,32 @@ static inline struct inode *new_inode(struct super_block *sb) {
 
     inode = alloc_inode(sb);
     return inode;
+}
+
+static inline void inode_lock(struct inode *inode) {
+    down_write(&inode->i_rwsem);
+}
+
+static inline void inode_unlock(struct inode *inode) {
+    up_write(&inode->i_rwsem);
+}
+
+static inline void inode_lock_shared(struct inode *inode) {
+    down_read(&inode->i_rwsem);
+}
+
+static inline void inode_unlock_shared(struct inode *inode) {
+    up_read(&inode->i_rwsem);
+}
+
+static inline void sb_start_write(struct super_block *sb) {
+    (void)sb;
+    return;
+}
+
+static inline void sb_end_write(struct super_block *sb) {
+    (void)sb;
+    return;
 }
 
 static inline void inode_init_owner(struct inode *inode,
@@ -568,6 +606,18 @@ static inline struct dentry *d_make_root(struct inode *root_inode) {
     return res;
 }
 
+static inline loff_t i_size_read(const struct inode *inode) {
+    return inode->i_size;
+}
+
+static inline void i_size_write(struct inode *inode, loff_t i_size) {
+    inode->i_size = i_size;
+}
+
+static inline int file_remove_privs(struct file *filp) {
+    return 0;
+}
+
 static loff_t generic_file_llseek_size(struct file *file, loff_t offset,
                                        int whence, loff_t maxsize, loff_t eof) {
     switch (whence) {
@@ -619,6 +669,7 @@ static inline struct file *alloc_file(const struct path *path, int flags,
     file->f_path = *path;
     file->f_inode = path->dentry->d_inode;
 
+    file->f_flags = flags;
     file->f_op = fop;
     file->f_pos = 0;
     return file;

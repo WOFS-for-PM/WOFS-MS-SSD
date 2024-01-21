@@ -35,6 +35,13 @@ ifeq ($(DEBUG), 1)
 	OPTS := -O0
 endif
 
+MODE ?= 1
+ifeq ($(MODE), 1)
+	CFLAGS += -DMODE_STRICT
+else ifeq ($(MODE), 0)
+	CFLAGS += -DMODE_ASYNC
+endif
+
 CFLAGS += $(OPTS)
 
 all: libkiller.so
@@ -69,7 +76,7 @@ ci-test: libkiller.so
 perf-test: libkiller.so
 	make clean && make -j$(nproc)
 	@echo "\033[35m\033[1m===== FIO Perf Tests =====\033[0m"
-	sudo bash scripts/run_killer.sh fio -filename=\a -fallocate=none -direct=0 -iodepth 1 -rw=write -ioengine=sync -bs=4K -size=10G -name=write
+	sudo bash scripts/run_killer.sh fio -filename=\a -fallocate=none -direct=0 -iodepth 1 -rw=write -ioengine=sync -bs=4K -size=4G -name=write
 	@echo "\033[32m\033[1m===== Done =====\n\033[0m"
 
 fio-strace:

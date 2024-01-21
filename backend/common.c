@@ -84,7 +84,7 @@ static int __insert_working_tree(struct thread_data *td, struct io_u *io_u,
                                  struct io_u **exist) {
     struct io_u *cur;
     struct rb_node **temp, *parent = NULL;
-    int compVal;
+    long compVal;
 
     temp = &td->working_tree.rb_node;
     if (exist)
@@ -100,6 +100,7 @@ static int __insert_working_tree(struct thread_data *td, struct io_u *io_u,
         else {
             if (exist)
                 *exist = cur;
+            assert(cur->offset == io_u->offset);
             pr_debug("%s: %ld exists\n", __func__, io_u->offset);
             return -EINVAL;
         }
@@ -598,7 +599,11 @@ int io_write(struct thread_data *td, off_t offset, char *buf, size_t len,
             }
         }
         io_u->opcode = IO_WRITE;
-        memcpy(io_u->buf + bias, buf, per_size);
+
+        if (buf)
+            memcpy(io_u->buf + bias, buf, per_size);
+        else
+            memset(io_u->buf + bias, 0, per_size);
 
         // Queue it any way
         // But might not release even the

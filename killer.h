@@ -252,57 +252,8 @@ static inline u32 hk_crc32c(u32 crc, const u8 *data, size_t len) {
     return csum;
 }
 
-static inline int memcpy_to_pmem_nocache(void *dst, const void *src,
-                                         unsigned int size) {
-    int ret;
-    hk_notimpl();
-    return ret;
-}
-
 static inline int hk_is_protected(struct super_block *sb) {
     return wprotect;
-}
-
-static inline void hk_unlock_range(struct super_block *sb, void *p,
-                                   unsigned long len, unsigned long *flags) {
-    struct hk_sb_info *sbi = HK_SB(sb);
-    if (hk_is_protected(sb)) {
-        if (sbi->dax) {
-            hk_notimpl();
-        } else {
-            // Do nothing
-        }
-    }
-}
-
-static inline void hk_lock_range(struct super_block *sb, void *p,
-                                 unsigned long len, unsigned long *flags) {
-    struct hk_sb_info *sbi = HK_SB(sb);
-    if (hk_is_protected(sb)) {
-        if (sbi->dax) {
-            hk_notimpl();
-        } else {
-            // Do nothing
-        }
-    }
-}
-
-static inline void hk_unlock_bm(struct super_block *sb, u16 bmblk,
-                                unsigned long *flags) {
-    struct hk_sb_info *sbi = HK_SB(sb);
-    void *addr = HK_BM_ADDR(sbi, bmblk);
-    u64 size = BMBLK_SIZE(sbi);
-
-    hk_unlock_range(sb, (void *)addr, size, flags);
-}
-
-static inline void hk_lock_bm(struct super_block *sb, u16 bmblk,
-                              unsigned long *flags) {
-    struct hk_sb_info *sbi = HK_SB(sb);
-    void *addr = HK_BM_ADDR(sbi, bmblk);
-    u64 size = BMBLK_SIZE(sbi);
-
-    hk_lock_range(sb, (void *)addr, size, flags);
 }
 
 static u64 inline get_ps_addr(struct hk_sb_info *sbi, u64 offset) {
@@ -344,30 +295,6 @@ static u64 inline get_ps_blk_addr(struct hk_sb_info *sbi, u64 blk) {
 static u64 inline get_ps_entry_addr(struct hk_sb_info *sbi, u64 blk,
                                     u32 entrynr) {
     return get_ps_blk_addr(sbi, blk) + ((u64)entrynr << KILLER_MTA_SHIFT);
-}
-
-static u64 inline is_last_ps_entry(struct hk_sb_info *sbi, u64 addr,
-                                   u32 entry_size) {
-    return ((addr + entry_size) & (KILLER_BLK_SIZE - 1)) == 0;
-}
-
-static void inline try_flush_meta_block(struct hk_sb_info *sbi,
-                                        u64 last_entry_addr) {
-    struct super_block *sb = sbi->sb;
-    if (sbi->dax) {
-        // TODO
-        /* Do nothing Now */
-    } else {
-        if (is_last_ps_entry(sbi, last_entry_addr, MTA_PKG_DATA_SIZE)) {
-            pr_warn("flush metadata block @ [0x%llx, 0x%llx)\n",
-                    round_down(last_entry_addr, 4096),
-                    round_down(last_entry_addr, 4096) + 4096);
-            // Clean metadata cache
-            io_wbinvd(CUR_DEV_HANDLER_PTR(sb),
-                      round_down(last_entry_addr, 4096), 4096);
-            io_fence(CUR_DEV_HANDLER_PTR(sb));
-        }
-    }
 }
 
 static inline struct tl_allocator *get_tl_allocator(struct hk_sb_info *sbi,
@@ -417,5 +344,60 @@ static inline unsigned long BKDRHash(const char *str, int length) {
 
 #define use_droot(droot, type) (spin_lock(&droot->type##_lock))
 #define rls_droot(droot, type) (spin_unlock(&droot->type##_lock))
+
+static inline int get_handle_by_addr(struct hk_sb_info *sbi, u64 addr);
+#include "io_dispatch.h"
+
+static inline void hk_unlock_bm(struct super_block *sb, u16 bmblk,
+                                unsigned long *flags) {
+    struct hk_sb_info *sbi = HK_SB(sb);
+    void *addr = HK_BM_ADDR(sbi, bmblk);
+    u64 size = BMBLK_SIZE(sbi);
+
+    io_dispatch_unlock_range(sb, (void *)addr, size, flags);
+}
+
+static inline void hk_lock_bm(struct super_block *sb, u16 bmblk,
+                              unsigned long *flags) {
+    struct hk_sb_info *sbi = HK_SB(sb);
+    void *addr = HK_BM_ADDR(sbi, bmblk);
+    u64 size = BMBLK_SIZE(sbi);
+
+    io_dispatch_lock_range(sb, (void *)addr, size, flags);
+}
+
+static inline int get_handle_by_addr(struct hk_sb_info *sbi, u64 addr) {
+    u64 blk = get_ps_blk(sbi, addr);
+    return (int)(blk % sbi->cpus);
+}
+
+static u64 inline __is_last_ps_entry(struct hk_sb_info *sbi, u64 addr,
+                                     u32 entry_size) {
+    return ((addr + entry_size) & (KILLER_BLK_SIZE - 1)) == 0;
+}
+
+static void inline try_evict_meta_block(struct hk_sb_info *sbi,
+                                        u64 last_entry_addr) {
+    if (__is_last_ps_entry(sbi, last_entry_addr, MTA_PKG_DATA_SIZE)) {
+        int handle = get_handle_by_addr(sbi, last_entry_addr);
+        hk_dbg("flush metadata block @ [0x%llx, 0x%llx)\n",
+               round_down(last_entry_addr, KILLER_BLK_SIZE),
+               round_down(last_entry_addr, KILLER_BLK_SIZE) + KILLER_BLK_SIZE);
+        // Clean metadata cache
+#ifdef MODE_STRICT
+        io_dispatch_wbinvd(sbi, handle,
+                           round_down(last_entry_addr, KILLER_BLK_SIZE),
+                           KILLER_BLK_SIZE);
+#elif MODE_ASYNC
+        io_dispatch_flush(sbi, handle,
+                          round_down(last_entry_addr, KILLER_BLK_SIZE),
+                          KILLER_BLK_SIZE);
+        io_dispatch_fence(sbi, handle);
+#else
+        hk_err("invalid mode, cur handle %d\n", handle);
+        BUG_ON(1);
+#endif
+    }
+}
 
 #endif

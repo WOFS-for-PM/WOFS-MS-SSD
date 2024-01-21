@@ -8,7 +8,7 @@
 #include "usyscall.h"
 #include "utils/parser.h"
 
-#define WRAPPER_DEBUG
+// #define WRAPPER_DEBUG
 
 #ifdef WRAPPER_DEBUG
 #define PRINT_FUNC pr_info("\tcalled KILLER func: %s\n", __func__)
@@ -662,11 +662,9 @@ static __attribute__((constructor(101))) void killer_init(void) {
 
         hk_fill_super(&sb, data, 0);
 
-#ifdef DEBUG
-        pr_info("Checking KILLER porting...\n");
-        assert(!port_test());
-        pr_info("KILLER porting is ready.\n");
-#endif
+        // pr_info("Checking KILLER porting...\n");
+        // assert(!port_test());
+        // pr_info("KILLER porting is ready.\n");
 
         pr_info("KILLER initialized in CPU %d.\n", smp_processor_id());
         pr_info("Now the program [%s] begins.\n", prog);

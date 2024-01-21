@@ -528,6 +528,7 @@ int init_hk_fs(void) {
         hk_err("Failed to create slab caches\n");
         return ret;
     }
+    assert(sizeof(off_t) == 8);
     return 0;
 }
 

@@ -234,7 +234,7 @@ DEFINE_UNIT_TEST_START(obj_test) {
         offset += written_size;
 
         // flush the metadata block
-        try_flush_meta_block(sbi, out_param.addr);
+        try_evict_meta_block(sbi, out_param.addr);
     }
 
     // Start GC
@@ -340,6 +340,36 @@ DEFINE_UNIT_TEST_START(vfs_test) {
 }
 DEFINE_UNIT_TEST_END(vfs_test)
 
+DEFINE_UNIT_TEST_START(io_dispatch_test) {
+    struct hk_sb_info *sbi = HK_SB(&sb);
+    char *buf = "God, I am a test string";
+    char read_buf[PAGE_SIZE];
+    int handle, region_handle;
+
+    handle = io_dispatch_write_thru(sbi, 0, buf, strlen(buf));
+    io_dispatch_fence(sbi, handle);
+    io_dispatch_read(sbi, 0, read_buf, strlen(buf));
+    assert(!strcmp(buf, read_buf));
+
+    char *target_addr;
+    IO_DISPATCH_START_DAX_REGION_VALUE(sbi, 0, strlen(buf),
+                                       IO_DISPATCH_START_UPDATE, target_addr) {
+        target_addr[0] = 'g';
+        target_addr[5] = 'i';
+
+        region_handle = IO_DISPATCH_COMMIT_REGION_VALUE_SAFE(
+            sbi, 0, strlen(buf), (u64)target_addr);
+    }
+    IO_DISPATCH_END_DAX_REGION_VALUE();
+
+    io_dispatch_flush(sbi, region_handle, 0, strlen(buf));
+    io_dispatch_fence(sbi, region_handle);
+
+    io_dispatch_read(sbi, 0, read_buf, strlen(buf));
+    assert(!strcmp(read_buf, "god, i am a test string"));
+}
+DEFINE_UNIT_TEST_END(io_dispatch_test)
+
 int port_test(void) {
     int ret = 0;
     u8 mode;
@@ -363,6 +393,10 @@ int port_test(void) {
 
     // vfs test
     ret = vfs_test(NULL);
+    assert(!ret);
+
+    // io dispatch test
+    ret = io_dispatch_test(NULL);
     assert(!ret);
 
     return ret;

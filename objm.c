@@ -1063,7 +1063,8 @@ void __fill_ps_inode_from_exist(struct hk_sb_info *sbi,
     struct inode *inode = &sih->si->vfs_inode;
     unsigned long irq_flags = 0;
 
-    hk_unlock_range(sb, ps_inode, sizeof(struct hk_obj_inode), &irq_flags);
+    io_dispatch_unlock_range(sb, ps_inode, sizeof(struct hk_obj_inode),
+                             &irq_flags);
     ps_inode->ino = sih->ino;
     ps_inode->i_create_time = inode->i_ctime.tv_sec;
     ps_inode->i_flags = inode->i_flags;
@@ -1073,7 +1074,8 @@ void __fill_ps_inode_from_exist(struct hk_sb_info *sbi,
     update->addr = get_ps_offset(sbi, (u64)ps_inode);
     update->ino = sih->ino;
     __fill_ps_obj_hdr(sbi, &ps_inode->hdr, OBJ_INODE);
-    hk_lock_range(sb, ps_inode, sizeof(struct hk_obj_inode), &irq_flags);
+    io_dispatch_lock_range(sb, ps_inode, sizeof(struct hk_obj_inode),
+                           &irq_flags);
 }
 
 typedef struct fill_attr {
@@ -1170,7 +1172,7 @@ void __fill_ps_attr(struct hk_sb_info *sbi, struct hk_obj_attr *attr,
     }
 
     if (attr != NULL) {
-        hk_unlock_range(sb, attr, sizeof(struct hk_obj_attr), &flags);
+        io_dispatch_unlock_range(sb, attr, sizeof(struct hk_obj_attr), &flags);
         attr->ino = ino;
         attr->i_mode = i_mode;
         attr->i_atime = i_atime;
@@ -1181,7 +1183,7 @@ void __fill_ps_attr(struct hk_sb_info *sbi, struct hk_obj_attr *attr,
         attr->i_gid = i_gid;
         attr->i_links_count = i_links_count;
         __fill_ps_obj_hdr(sbi, &attr->hdr, OBJ_ATTR);
-        hk_lock_range(sb, attr, sizeof(struct hk_obj_attr), &flags);
+        io_dispatch_lock_range(sb, attr, sizeof(struct hk_obj_attr), &flags);
     }
 }
 
@@ -1200,11 +1202,11 @@ void __fill_ps_dentry(struct hk_sb_info *sbi, struct hk_obj_dentry *dentry,
     dentry->ino = param->ino;
     dentry->parent_ino = dentry_param->parent_ino;
 
-    hk_unlock_range(sb, dentry, sizeof(struct hk_obj_dentry), &flags);
+    io_dispatch_unlock_range(sb, dentry, sizeof(struct hk_obj_dentry), &flags);
     memcpy(dentry->name, dentry_param->name, dentry_param->len);
     dentry->name[dentry_param->len] = '\0';
     __fill_ps_obj_hdr(sbi, &dentry->hdr, OBJ_DENTRY);
-    hk_lock_range(sb, dentry, sizeof(struct hk_obj_dentry), &flags);
+    io_dispatch_lock_range(sb, dentry, sizeof(struct hk_obj_dentry), &flags);
 }
 
 typedef struct fill_pkg_hdr {
@@ -1267,7 +1269,7 @@ void __fill_ps_pkg_hdr(struct hk_sb_info *sbi, struct hk_pkg_hdr *pkg_hdr,
     struct super_block *sb = sbi->sb;
     unsigned long flags = 0;
 
-    hk_unlock_range(sb, pkg_hdr, sizeof(struct hk_pkg_hdr), &flags);
+    io_dispatch_unlock_range(sb, pkg_hdr, sizeof(struct hk_pkg_hdr), &flags);
     pkg_hdr->pkg_type = pkg_hdr_param->type;
     switch (pkg_hdr_param->type) {
         case PKG_DATA:
@@ -1288,30 +1290,26 @@ void __fill_ps_pkg_hdr(struct hk_sb_info *sbi, struct hk_pkg_hdr *pkg_hdr,
             break;
     }
     __fill_ps_obj_hdr(sbi, &pkg_hdr->hdr, OBJ_PKGHDR);
-    hk_lock_range(sb, pkg_hdr, sizeof(struct hk_pkg_hdr), &flags);
+    io_dispatch_lock_range(sb, pkg_hdr, sizeof(struct hk_pkg_hdr), &flags);
 }
 
-void commit_pkg(struct hk_sb_info *sbi, void *obj_addr_start,
-                void *obj_buf_start, u32 len, struct hk_obj_hdr *last_obj_hdr) {
+void commit_pkg(struct hk_sb_info *sbi, void *dev_addr, void *target_addr,
+                u32 len, struct hk_obj_hdr *last_obj_hdr) {
     struct super_block *sb = sbi->sb;
     unsigned long flags = 0;
     INIT_TIMING(time);
 
     HK_START_TIMING(wr_once_t, time);
-    hk_unlock_range(sb, last_obj_hdr, sizeof(struct hk_obj_hdr), &flags);
+
+    io_dispatch_unlock_range(sb, last_obj_hdr, sizeof(struct hk_obj_hdr),
+                             &flags);
     /* fence-once */
-    last_obj_hdr->crc32 = hk_crc32c(~0, (const u8 *)obj_buf_start, len);
+    last_obj_hdr->crc32 = hk_crc32c(~0, (const u8 *)target_addr, len);
+    IO_DISPATCH_COMMIT_REGION_VALUE(sbi, (u64)dev_addr, len, (u64)target_addr);
+    io_dispatch_lock_range(sb, last_obj_hdr, sizeof(struct hk_obj_hdr), &flags);
 
-    if (sbi->dax) {
-        hk_flush_buffer(obj_buf_start, len, true);
-    } else {
-        io_write(CUR_DEV_HANDLER_PTR(sb), (off_t)obj_addr_start, obj_buf_start,
-                 len, O_IO_CACHED);
-        io_clwb(CUR_DEV_HANDLER_PTR(sb), (off_t)obj_addr_start, len);
-        io_fence(CUR_DEV_HANDLER_PTR(sb));
-    }
+    try_evict_meta_block(sbi, (u64)dev_addr);
 
-    hk_lock_range(sb, last_obj_hdr, sizeof(struct hk_obj_hdr), &flags);
     HK_END_TIMING(wr_once_t, time);
 }
 
@@ -1451,8 +1449,8 @@ int create_new_inode_pkg(struct hk_sb_info *sbi, u16 mode, const char *name,
     unsigned long flags = 0;
     pkg_hdr->hdr.crc32 =
         hk_crc32c(~0, (const u8 *)pkg_buf, MTA_PKG_CREATE_SIZE);
-    hk_unlock_range(sbi->sb, (void *)out_param->addr, MTA_PKG_CREATE_SIZE,
-                    &flags);
+    io_dispatch_unlock_range(sbi->sb, (void *)out_param->addr,
+                             MTA_PKG_CREATE_SIZE, &flags);
     if (sbi->dax) {
         /* fence-once */
         memcpy_to_pmem_nocache((void *)out_param->addr, pkg_buf,
@@ -1464,8 +1462,8 @@ int create_new_inode_pkg(struct hk_sb_info *sbi, u16 mode, const char *name,
                 MTA_PKG_CREATE_SIZE);
         io_fence(CUR_DEV_HANDLER_PTR(sbi->sb));
     }
-    hk_lock_range(sbi->sb, (void *)out_param->addr, MTA_PKG_CREATE_SIZE,
-                  &flags);
+    io_dispatch_lock_range(sbi->sb, (void *)out_param->addr,
+                           MTA_PKG_CREATE_SIZE, &flags);
 
     /* address re-assignment */
     obj_dentry = (struct hk_obj_dentry *)(out_param->addr + OBJ_INODE_SIZE);
@@ -1667,11 +1665,10 @@ int update_data_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
                 new_size = value;
                 /* To avoid re-calc CheckSum, we store the value in the reserved
                  * area */
-                /* NOTE: To recover, first assign `reserved` to 0, and see if
-                 * the pack */
-                /*       is valid. If valid, then this is a good package.
-                 * Otherwise it */
-                /*       can be discarded.*/
+                /* To recover, first assign `reserved` to 0, and see if the pack
+                 */
+                /* is valid. If valid, then this is a good package.
+                 * Otherwise it can be discarded.*/
                 data->hdr.reserved = value;
                 hk_flush_buffer(data, CACHELINE_SIZE, true);
                 break;
@@ -1711,34 +1708,25 @@ int create_data_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
     }
 
     data = (struct hk_obj_data *)(out_param->addr);
-    if (sbi->dax) {
-        cur_addr = data;
-    } else {
-        // do not access data, data is only an offset
-        char pkg_buf[OBJ_DATA_SIZE];
-        cur_addr = (struct hk_obj_data *)pkg_buf;
+    IO_DISPATCH_START_DAX_REGION_VALUE(sbi, (u64)data, OBJ_DATA_SIZE,
+                                       IO_DISPATCH_START_WRITE, start_addr) {
+        cur_addr = start_addr;
+        cur_addr->ino = sih->ino;
+        cur_addr->blk = blk;
+        cur_addr->ofs = offset;
+        cur_addr->num = num;
+        cur_addr->i_cmtime = sih->i_ctime;
+        cur_addr->i_size = size_after_write;
+        if (in_param->bin) {
+            __fill_ps_obj_hdr(sbi, &cur_addr->hdr,
+                              ((u32)in_param->bin_type << 16) | OBJ_DATA);
+        } else {
+            __fill_ps_obj_hdr(sbi, &cur_addr->hdr, OBJ_DATA);
+        }
+        commit_pkg(sbi, (void *)(data), start_addr, OBJ_DATA_SIZE,
+                   &cur_addr->hdr);
     }
-    start_addr = cur_addr;
-
-    cur_addr->ino = sih->ino;
-    cur_addr->blk = blk;
-    cur_addr->ofs = offset;
-    cur_addr->num = num;
-    cur_addr->i_cmtime = sih->i_ctime;
-    cur_addr->i_size = size_after_write;
-    if (in_param->bin) {
-        __fill_ps_obj_hdr(sbi, &cur_addr->hdr,
-                          ((u32)in_param->bin_type << 16) | OBJ_DATA);
-    } else {
-        __fill_ps_obj_hdr(sbi, &cur_addr->hdr, OBJ_DATA);
-    }
-
-    if (unlikely(size < HK_BLK_SZ)) {
-        sfence();
-    }
-    /* flush + fence-once to commit the package */
-    commit_pkg(sbi, (void *)(out_param->addr), start_addr, OBJ_DATA_SIZE,
-               &cur_addr->hdr);
+    IO_DISPATCH_END_DAX_REGION_VALUE();
 
     /* NOTE: prevent read after persist  */
     data_update.build_from_exist = false;
