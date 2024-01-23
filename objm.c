@@ -973,15 +973,14 @@ int reserve_pkg_space_in_layout(obj_mgr_t *mgr, struct hk_layout_info *layout,
         goto out;
     }
 
-    // TODO:
-    // if (param._ret_allocated > 0) {
-    //     /* ensure meta block be written synchronously, for fast recovery */
-    //     /* let's see the penalty of this */
-    //     /* During sequential write, this can be ignored */
-    //     /* However, random write can suffer severe due to this */
-    //     hk_set_bm(sbi, meta_type_to_bmblk(TL_ALLOC_MTA_TYPE(m_alloc_type)),
-    //               param._ret_rng.low);
-    // }
+    if (param._ret_allocated > 0) {
+        /* ensure meta block be written synchronously, for fast recovery */
+        /* let's see the penalty of this */
+        /* During sequential write, this can be ignored */
+        /* However, random write can suffer severe due to this */
+        hk_set_bm(sbi, meta_type_to_bmblk(TL_ALLOC_MTA_TYPE(m_alloc_type)),
+                  param._ret_rng.low);
+    }
 
     addr = param._ret_rng.low;
     entrynr = param._ret_rng.high;
@@ -1305,7 +1304,7 @@ void commit_pkg(struct hk_sb_info *sbi, void *dev_addr, void *target_addr,
                              &flags);
     /* fence-once */
     last_obj_hdr->crc32 = hk_crc32c(~0, (const u8 *)target_addr, len);
-    IO_DISPATCH_COMMIT_REGION_VALUE(sbi, (u64)dev_addr, len, (u64)target_addr);
+    io_dispatch_msync(sbi, (u64)dev_addr, len, (u64)target_addr);
     io_dispatch_lock_range(sb, last_obj_hdr, sizeof(struct hk_obj_hdr), &flags);
 
     try_evict_meta_block(sbi, (u64)dev_addr);
@@ -1335,7 +1334,7 @@ int create_new_inode_pkg(struct hk_sb_info *sbi, u16 mode, const char *name,
                          struct hk_inode_info_header *sih,
                          struct hk_inode_info_header *psih,
                          in_pkg_param_t *in_param, out_pkg_param_t *out_param) {
-    u64 cur_addr;
+    u64 cur_addr, start_addr;
     obj_mgr_t *obj_mgr = sbi->obj_mgr;
     struct hk_obj_dentry *obj_dentry;
     struct hk_obj_inode *obj_inode;
@@ -1349,7 +1348,6 @@ int create_new_inode_pkg(struct hk_sb_info *sbi, u16 mode, const char *name,
     u32 rdev = ((in_create_pkg_param_t *)(in_param->private))->rdev;
     u32 ino = 0, parent_ino, orig_ino;
     int ret = 0;
-    unsigned char pkg_buf[MTA_PKG_CREATE_SIZE];
     INIT_TIMING(time);
 
     HK_START_TIMING(new_inode_trans_t, time);
@@ -1384,8 +1382,11 @@ int create_new_inode_pkg(struct hk_sb_info *sbi, u16 mode, const char *name,
     }
 
     fill_attr_t attr_param;
-    // cur_addr = out_param->addr;
-    cur_addr = (u64)pkg_buf;
+
+    start_addr = (u64)io_dispatch_mmap(sbi, out_param->addr,
+                                       MTA_PKG_CREATE_SIZE, IO_D_PROT_WRITE);
+
+    cur_addr = start_addr;
     if (create_type == CREATE_FOR_RENAME) {
         hk_dbg("create inode pkg, ino: %u, addr: 0x%llx, offset: 0x%llx\n", ino,
                out_param->addr, get_ps_offset(sbi, out_param->addr));
@@ -1444,26 +1445,9 @@ int create_new_inode_pkg(struct hk_sb_info *sbi, u16 mode, const char *name,
     cur_addr += OBJ_PKGHDR_SIZE;
 
     /* flush + fence-once to commit the package */
-    // commit_pkg(sbi, (void *)(out_param->addr), cur_addr - out_param->addr,
-    // &pkg_hdr->hdr);
-    unsigned long flags = 0;
-    pkg_hdr->hdr.crc32 =
-        hk_crc32c(~0, (const u8 *)pkg_buf, MTA_PKG_CREATE_SIZE);
-    io_dispatch_unlock_range(sbi->sb, (void *)out_param->addr,
-                             MTA_PKG_CREATE_SIZE, &flags);
-    if (sbi->dax) {
-        /* fence-once */
-        memcpy_to_pmem_nocache((void *)out_param->addr, pkg_buf,
-                               MTA_PKG_CREATE_SIZE);
-    } else {
-        io_write(CUR_DEV_HANDLER_PTR(sbi->sb), (off_t)out_param->addr,
-                 (char *)pkg_buf, MTA_PKG_CREATE_SIZE, O_IO_CACHED);
-        io_clwb(CUR_DEV_HANDLER_PTR(sbi->sb), (off_t)out_param->addr,
-                MTA_PKG_CREATE_SIZE);
-        io_fence(CUR_DEV_HANDLER_PTR(sbi->sb));
-    }
-    io_dispatch_lock_range(sbi->sb, (void *)out_param->addr,
-                           MTA_PKG_CREATE_SIZE, &flags);
+    commit_pkg(sbi, (void *)(out_param->addr), (void *)start_addr,
+               cur_addr - start_addr, &pkg_hdr->hdr);
+    io_dispatch_munmap(sbi, (void *)start_addr);
 
     /* address re-assignment */
     obj_dentry = (struct hk_obj_dentry *)(out_param->addr + OBJ_INODE_SIZE);
@@ -1587,14 +1571,16 @@ int create_unlink_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
         }
     }
 
-    if (sbi->dax) {
-        cur_addr = out_param->addr;
-    } else {
-        // do not access data, data is only an offset
-        char pkg_buf[MTA_PKG_UNLINK_SIZE];
-        cur_addr = (u64)pkg_buf;
-    }
-    start_addr = cur_addr;
+    // if (sbi->dax) {
+    //     cur_addr = out_param->addr;
+    // } else {
+    //     // do not access data, data is only an offset
+    //     char pkg_buf[MTA_PKG_UNLINK_SIZE];
+    //     cur_addr = (u64)pkg_buf;
+    // }
+    start_addr = (u64)io_dispatch_mmap(sbi, out_param->addr,
+                                       MTA_PKG_UNLINK_SIZE, IO_D_PROT_WRITE);
+    cur_addr = start_addr;
 
     dep_ofs = sih->latest_fop.latest_inode->hdr.addr;
 
@@ -1616,7 +1602,8 @@ int create_unlink_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
 
     /* flush + fence-once to commit the package */
     commit_pkg(sbi, (void *)(out_param->addr), (void *)start_addr,
-               cur_addr - out_param->addr, &pkg_hdr->hdr);
+               cur_addr - start_addr, &pkg_hdr->hdr);
+    io_dispatch_munmap(sbi, (void *)start_addr);
 
     /* fill pseudo parent attr to prevent in-PM allocation */
     fill_attr_t attr_param = {
@@ -1655,6 +1642,9 @@ int update_data_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
     va_list ap;
     struct hk_obj_data *data = (struct hk_obj_data *)hdr_addr;
     size_t new_size = sih->i_size;
+
+    // crash if calling this function on non-dax device
+    assert(sbi->dax);
 
     va_start(ap, num_kv_pairs);
     for (i = 0; i < num_kv_pairs << 1; i += 2) {
@@ -1708,25 +1698,23 @@ int create_data_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
     }
 
     data = (struct hk_obj_data *)(out_param->addr);
-    IO_DISPATCH_START_DAX_REGION_VALUE(sbi, (u64)data, OBJ_DATA_SIZE,
-                                       IO_DISPATCH_START_WRITE, start_addr) {
-        cur_addr = start_addr;
-        cur_addr->ino = sih->ino;
-        cur_addr->blk = blk;
-        cur_addr->ofs = offset;
-        cur_addr->num = num;
-        cur_addr->i_cmtime = sih->i_ctime;
-        cur_addr->i_size = size_after_write;
-        if (in_param->bin) {
-            __fill_ps_obj_hdr(sbi, &cur_addr->hdr,
-                              ((u32)in_param->bin_type << 16) | OBJ_DATA);
-        } else {
-            __fill_ps_obj_hdr(sbi, &cur_addr->hdr, OBJ_DATA);
-        }
-        commit_pkg(sbi, (void *)(data), start_addr, OBJ_DATA_SIZE,
-                   &cur_addr->hdr);
+    start_addr =
+        io_dispatch_mmap(sbi, (u64)data, OBJ_DATA_SIZE, IO_D_PROT_WRITE);
+    cur_addr = start_addr;
+    cur_addr->ino = sih->ino;
+    cur_addr->blk = blk;
+    cur_addr->ofs = offset;
+    cur_addr->num = num;
+    cur_addr->i_cmtime = sih->i_ctime;
+    cur_addr->i_size = size_after_write;
+    if (in_param->bin) {
+        __fill_ps_obj_hdr(sbi, &cur_addr->hdr,
+                          ((u32)in_param->bin_type << 16) | OBJ_DATA);
+    } else {
+        __fill_ps_obj_hdr(sbi, &cur_addr->hdr, OBJ_DATA);
     }
-    IO_DISPATCH_END_DAX_REGION_VALUE();
+    commit_pkg(sbi, (void *)(data), start_addr, OBJ_DATA_SIZE, &cur_addr->hdr);
+    io_dispatch_munmap(sbi, start_addr);
 
     /* NOTE: prevent read after persist  */
     data_update.build_from_exist = false;
@@ -1750,8 +1738,7 @@ int create_attr_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
                     int link_change, int size_change, in_pkg_param_t *in_param,
                     out_pkg_param_t *out_param) {
     obj_mgr_t *obj_mgr = sbi->obj_mgr;
-    struct hk_obj_attr *attr;
-    u64 start_addr, cur_addr;
+    struct hk_obj_attr *attr, *start_addr, *cur_addr;
     fill_attr_t attr_param;
     fill_param_t fill_param;
     attr_update_t attr_update;
@@ -1763,15 +1750,9 @@ int create_attr_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
         goto out;
     }
 
-    if (sbi->dax) {
-        cur_addr = out_param->addr;
-    } else {
-        // do not access data, data is only an offset
-        char pkg_buf[OBJ_ATTR_SIZE];
-        cur_addr = (u64)pkg_buf;
-    }
-    start_addr = cur_addr;
-
+    start_addr = io_dispatch_mmap(sbi, (u64)out_param->addr, OBJ_ATTR_SIZE,
+                                  IO_D_PROT_WRITE);
+    cur_addr = start_addr;
     attr = (struct hk_obj_attr *)cur_addr;
     attr_param.options =
         FILL_ATTR_FILE | (FILL_ATTR_SIZE_CHANGE | FILL_ATTR_LINK_CHANGE);
@@ -1782,8 +1763,9 @@ int create_attr_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
     fill_param.ino = sih->ino;
     fill_param.data = &attr_param;
     __fill_ps_attr(sbi, attr, &fill_param);
-    commit_pkg(sbi, (void *)(out_param->addr), (void *)start_addr,
-               OBJ_ATTR_SIZE, &attr->hdr);
+    commit_pkg(sbi, (void *)(out_param->addr), start_addr, OBJ_ATTR_SIZE,
+               &attr->hdr);
+    io_dispatch_munmap(sbi, start_addr);
 
     attr_update.from_pkg = PKG_ATTR;
     ur_dram_latest_attr(obj_mgr, sih, &attr_update);

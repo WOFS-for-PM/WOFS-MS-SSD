@@ -9,9 +9,8 @@
 
 #define BMBLK_SIZE(sbi) (sbi->tl_per_type_bm_reserved_blks << PAGE_SHIFT)
 
-#define HK_BM_ADDR(sbi, bmblk_type) \
-    (u8 *)((u64)sbi->bm_start +     \
-           (bmblk_type *            \
-            (sbi->tl_per_type_bm_reserved_blks << KILLER_BLK_SHIFT)))
+#define HK_BM_ADDR(sbi, start, bmblk_type)                                 \
+    (u8 *)((u64)(start) + (bmblk_type * (sbi->tl_per_type_bm_reserved_blks \
+                                         << KILLER_BLK_SHIFT)))
 
 #endif

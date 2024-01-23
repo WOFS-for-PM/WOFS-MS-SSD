@@ -75,6 +75,8 @@ struct hk_sb_info {
     /* bitmaps for saving packages allocation info */
     u64 bm_start;
     u64 bm_size;
+    void *hk_bms;
+
     u64 fs_start;
     u64 tl_per_type_bm_reserved_blks;
     atomic64_t vtail;

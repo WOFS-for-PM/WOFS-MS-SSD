@@ -4,6 +4,7 @@
 
 #include <stddef.h>
 #include "porting.h"
+#include "string.h"
 
 #define SIZE_ALIGNED(sz)                                               \
     ({                                                                 \
@@ -61,5 +62,11 @@ extern void __free__(void *);
         __free__(p);                           \
     })
 #endif
+
+static __always_inline unsigned long __must_check
+copy_to_user(void __user *to, const void *from, unsigned long n) {
+    memcpy(to, from, n);
+    return n;
+}
 
 #endif

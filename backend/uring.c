@@ -131,7 +131,6 @@ static int __ioring_queue_init(struct ioring_data *ld, int sqpoll_cpu) {
 
     memset(&p, 0, sizeof(p));
 
-    // TODO: Why this blocks my program?
     p.flags |= IORING_SETUP_IOPOLL;
     p.flags |= IORING_SETUP_SQPOLL;
     if (sqpoll_cpu >= 0) {

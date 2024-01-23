@@ -334,7 +334,7 @@
 
 #define KILLER_ALL_OPS \
     (OPEN)(            \
-        OPEN64)(OPENAT)(CREAT)(CLOSE)(ACCESS)(SEEK)(TRUNC)(FTRUNC)(LINK)(UNLINK)(FSYNC)(READ)(WRITE)(PREAD)(PREAD64)(PWRITE)(PWRITE64)(XSTAT)(XSTAT64)(RENAME)(MKDIR)(RMDIR)(FSTATFS)(FDATASYNC)(FCNTL)(FADVISE)(OPENDIR)(CLOSEDIR)(READDIR)(READDIR64)(SYNC_FILE_RANGE)(FOPEN)(FPUTS)(FGETS)(FWRITE)(FREAD)(FCLOSE)(FSEEK)(FFLUSH)
+        OPEN64)(OPENAT)(CREAT)(CLOSE)(ACCESS)(SEEK)(TRUNC)(FTRUNC)(FTRUNC64)(LINK)(UNLINK)(FSYNC)(READ)(WRITE)(PREAD)(PREAD64)(PWRITE)(PWRITE64)(XSTAT)(XSTAT64)(RENAME)(MKDIR)(RMDIR)(FSTATFS)(FDATASYNC)(FCNTL)(FADVISE)(OPENDIR)(CLOSEDIR)(READDIR)(READDIR64)(SYNC_FILE_RANGE)(FOPEN)(FPUTS)(FGETS)(FWRITE)(FREAD)(FCLOSE)(SEEK64)(FFLUSH)
 
 #define PREFIX(call) (real_##call)
 
@@ -401,7 +401,7 @@ OP_DEFINE_SAFE(OPEN, {
 #ifdef WRAPPER_DEBUG
             pr_info("\t\tpath: %s\n", path);
 #endif
-            ret = usys_open((*path == '\\') ? path + 1 : path, oflag);
+            ret = usys_open((*path == '\\') ? path + 1 : path, oflag, 0);
             if (ret == -1 && *path != '\\') {
                 return real_ops.OPEN(path, oflag);
             }
@@ -490,6 +490,42 @@ OP_DEFINE_SAFE(WRITE, {
     }
 })
 
+OP_DEFINE_SAFE(READ, {
+    if (file >= HK_FD_OFFSET) {
+        PRINT_FUNC;
+        return usys_read(file - HK_FD_OFFSET, buf, length);
+    } else {
+        return real_ops.READ(file, buf, length);
+    }
+})
+
+OP_DEFINE_SAFE(FTRUNC64, {
+    if (file >= HK_FD_OFFSET) {
+        PRINT_FUNC;
+        return usys_ftruncate(file - HK_FD_OFFSET, length);
+    } else {
+        return real_ops.FTRUNC64(file, length);
+    }
+})
+
+OP_DEFINE_SAFE(SEEK64, {
+    if (file >= HK_FD_OFFSET) {
+        PRINT_FUNC;
+        return usys_lseek(file - HK_FD_OFFSET, offset, whence);
+    } else {
+        return real_ops.SEEK64(file, offset, whence);
+    }
+})
+
+OP_DEFINE_SAFE(FSYNC, {
+    if (file >= HK_FD_OFFSET) {
+        PRINT_FUNC;
+        return usys_fsync(file - HK_FD_OFFSET);
+    } else {
+        return real_ops.FSYNC(file);
+    }
+})
+
 OP_DEFINE_SAFE(FADVISE, {
     PRINT_FUNC;
     if (fd >= HK_FD_OFFSET) {
@@ -540,7 +576,6 @@ struct super_block sb = {.s_fs_info = NULL};
 
 extern int hk_fill_super(struct super_block *sb, void *data, int silent);
 extern void hk_put_super(struct super_block *sb);
-extern int hk_show_stats(void);
 
 #define MAX_BACKTRACE 16
 
@@ -643,6 +678,13 @@ static __attribute__((constructor(101))) void killer_init(void) {
     pr_info("Starting to initialize KILLER.\n");
     pr_info("Installing real syscalls...\n");
     pr_info("Real syscall installed. Initializing KILLER...\n");
+#ifdef MODE_STRICT
+    pr_info("> Strict mode enabled.\n");
+#elif MODE_ASYNC
+    pr_info("> Async mode enabled.\n");
+#else
+    BUG_ON(1);
+#endif
 
     signal(SIGSEGV, err_handler);
     signal(SIGINT, err_handler);
@@ -687,8 +729,6 @@ static __attribute__((destructor)) void killer_destroy(void) {
     }
 #endif
 
-    if (measure_timing)
-        hk_show_stats();
     hk_put_super(&sb);
 
     pr_info("KILLER unloaded.\n");

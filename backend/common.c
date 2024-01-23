@@ -80,6 +80,12 @@ static int __io_check_in_range(struct io_u *io_u, off_t offset, size_t len) {
     return io_u->offset >= offset && io_u->offset + io_u->cap <= offset + len;
 }
 
+static int __io_check_overlapped(struct io_u *io_u, off_t offset, size_t len) {
+    pr_debug("io_u->offset: %ld, io_u->cap: %ld, offset: %ld, len: %ld\n",
+             io_u->offset, io_u->cap, offset, len);
+    return io_u->offset + io_u->cap > offset && offset + len > io_u->offset;
+}
+
 static int __insert_working_tree(struct thread_data *td, struct io_u *io_u,
                                  struct io_u **exist) {
     struct io_u *cur;
@@ -318,19 +324,19 @@ static int __io_reap_for_reader(struct thread_data *td, struct io_u *io_u,
         __remove_working_tree(td, io_u);
     }
 
-    if (io_u->opcode == IO_WRITE) {
-        // TODO: Handle this
-        assert(0);
-    }
-
-    bias = req_offset - io_u->offset;
-    pr_debug("%s: bias %ld\n", __func__, bias);
-    if (bias > 0) {
-        len = io_u->cap - bias > req_len ? req_len : io_u->cap - bias;
-        memcpy(buf, io_u->buf + bias, len);
+    if (__io_check_overlapped(io_u, req_offset, req_len)) {
+        bias = req_offset - io_u->offset;
+        pr_debug("%s: bias %ld\n", __func__, bias);
+        if (bias > 0) {
+            len = io_u->cap - bias > req_len ? req_len : io_u->cap - bias;
+            memcpy(buf, io_u->buf + bias, len);
+        } else {
+            len = bias + req_len > io_u->cap ? io_u->cap : bias + req_len;
+            memcpy(buf - bias, io_u->buf, len);
+        }
     } else {
-        len = bias + req_len > io_u->cap ? io_u->cap : bias + req_len;
-        memcpy(buf - bias, io_u->buf, len);
+        pr_debug("%s: no overlap\n", __func__);
+        assert(io_u->opcode == IO_WRITE);
     }
 
     return 0;
@@ -541,6 +547,9 @@ int io_close(struct thread_data *td) {
     return 0;
 }
 
+int io_read(struct thread_data *td, off_t offset, char *buf, size_t len,
+            int flags);
+
 // Return partial write io_u idx (it is your choice to queue it or not)
 // -1 means no partial write, all io_u(s) are queued
 // -EBUSY means no io_u available
@@ -594,8 +603,10 @@ int io_write(struct thread_data *td, off_t offset, char *buf, size_t len,
         } else {
             need_queued = !(flags & O_IO_CACHED);
             if (bias != 0) {
-                pr_warn("Partial write without caching: %ld, %ld\n",
+                pr_warn("Partial write without caching: %ld, %ld, try read "
+                        "modify write\n",
                         io_u->offset, bias);
+                io_read(td, io_u->offset, io_u->buf, td->bs, O_IO_DROP);
             }
         }
         io_u->opcode = IO_WRITE;
@@ -613,7 +624,8 @@ int io_write(struct thread_data *td, off_t offset, char *buf, size_t len,
 
         offset += per_size;
         len -= per_size;
-        buf += per_size;
+        if (buf)
+            buf += per_size;
         index += 1;
     }
 
@@ -621,7 +633,7 @@ int io_write(struct thread_data *td, off_t offset, char *buf, size_t len,
 }
 
 // Must wait for all io_u(s) to be completed
-// TODO: support io_u tree here for cache coherency
+// NOTE: `flags` is not used for read anymore
 int io_read(struct thread_data *td, off_t offset, char *buf, size_t len,
             int flags) {
     struct io_u *io_u = NULL, *exist;
@@ -662,7 +674,7 @@ int io_read(struct thread_data *td, off_t offset, char *buf, size_t len,
             assert((exist->offset & (td->bs - 1)) == 0);
             assert(__io_check_in_range(io_u, exist->offset, exist->cap));
             assert(exist->flags & O_IO_CACHED);
-            assert(flags & O_IO_CACHED || flags & O_IO_AUTO);
+            assert(exist->opcode == IO_WRITE);
             pr_debug("HIT: %ld\n", io_u->offset);
             __mark_io_u_available(td, io_u);
             // Directly read from cache
@@ -755,11 +767,15 @@ int io_wbinvd(struct thread_data *td, off_t offset, size_t len) {
     for (cur = aligned_offset; cur < aligned_offset + aligned_len;
          cur += td->bs) {
         if (__search_working_tree(td, cur, &io_u)) {
-            r++;
-            assert(io_u->flags & O_IO_CACHED);
-            io_u->flags = O_IO_DROP;
-            pr_debug("%s: io_u->idx: %d (%ld)\n", __func__, io_u->idx,
-                     io_u->offset);
+            // has been fenced
+            if (!(io_u->flags & O_IO_CACHED)) {
+                assert(io_u->flags & O_IO_DROP);
+            } else {
+                r++;
+                io_u->flags = O_IO_DROP;
+                pr_debug("%s: io_u->idx: %d (%ld)\n", __func__, io_u->idx,
+                         io_u->offset);
+            }
         }
     }
 
@@ -782,6 +798,24 @@ int io_flush(struct thread_data *td, off_t offset, size_t len) {
             __io_queue(td, io_u->idx);
             pr_debug("%s: io_u->idx: %d (%ld)\n", __func__, io_u->idx,
                      io_u->offset);
+        }
+    }
+
+    return r;
+}
+
+// flush all the cached io_u(s) to media
+int io_drain(struct thread_data *td) {
+    struct io_u *io_u, *n;
+    int r = 0;
+
+    rbtree_postorder_for_each_entry_safe(io_u, n, &td->working_tree, rb_node) {
+        if (io_u->flags & O_IO_CACHED) {
+            io_u->flags = O_IO_DROP;
+            __io_queue(td, io_u->idx);
+            pr_debug("%s: io_u->idx: %d (%ld)\n", __func__, io_u->idx,
+                     io_u->offset);
+            r++;
         }
     }
 

@@ -29,11 +29,7 @@ int hk_block_symlink(struct super_block *sb, struct inode *inode,
     }
 
     /* the block is zeroed already */
-    // TODO: I/O
-    hk_notimpl();
-    // hk_memunlock_block(sb, (void *)blk_addr, &irq_flags);
-    memcpy_to_pmem_nocache((void *)blk_addr, symname, len);
-    // hk_memlock_block(sb, (void *)blk_addr, &irq_flags);
+    io_dispatch_write_thru(sbi, blk_addr, (void *)symname, len);
 
     if (out_blk_addr) {
         *(u64 *)out_blk_addr = blk_addr;
@@ -52,10 +48,9 @@ static int hk_readlink_copy(char __user *buffer, int buflen, const char *link) {
     len = strlen(link);
     if (len > (unsigned int)buflen)
         len = buflen;
-    // TODO: I/O
-    hk_notimpl();
-    // if (copy_to_user(buffer, link, len))
-    //     len = -EFAULT;
+
+    if (copy_to_user(buffer, link, len))
+        len = -EFAULT;
 out:
     return len;
 }
@@ -66,13 +61,19 @@ static int hk_readlink(struct dentry *dentry, char __user *buffer, int buflen) {
     struct hk_sb_info *sbi = HK_SB(sb);
     struct hk_inode_info *si = HK_I(inode);
     struct hk_inode_info_header *sih = si->header;
-    u64 blk_addr;
-
     obj_ref_data_t *ref = NULL;
+    u64 blk_addr;
+    void *target_addr;
+    int ret;
+
     ref = (obj_ref_data_t *)hk_inode_get_slot(sih, 0);
     blk_addr = get_ps_addr(sbi, ref->data_offset);
 
-    return hk_readlink_copy(buffer, buflen, (char *)blk_addr);
+    target_addr = io_dispatch_mmap(sbi, blk_addr, HK_BLK_SZ, IO_D_PROT_READ);
+    ret = hk_readlink_copy(buffer, buflen, target_addr);
+    io_dispatch_munmap(sbi, target_addr);
+
+    return ret;
 }
 
 static const char *hk_get_link(struct dentry *dentry, struct inode *inode,
@@ -81,16 +82,17 @@ static const char *hk_get_link(struct dentry *dentry, struct inode *inode,
     struct hk_sb_info *sbi = HK_SB(sb);
     struct hk_inode_info *si = HK_I(inode);
     struct hk_inode_info_header *sih = si->header;
-    u64 blk_addr;
+    char *link;
 
     obj_ref_data_t *ref = NULL;
     ref = (obj_ref_data_t *)hk_inode_get_slot(sih, 0);
 
-    hk_notimpl();
-    // TODO: I/O
-    blk_addr = get_ps_addr(sbi, ref->data_offset);
+    if (sbi->dax)
+        link = (char *)get_ps_addr(sbi, ref->data_offset);
+    else
+        link = inode->i_link;
 
-    return (char *)blk_addr;
+    return link;
 }
 
 const struct inode_operations hk_symlink_inode_operations = {

@@ -5,10 +5,11 @@
 
 static int hk_readdir(struct file *file, struct dir_context *ctx) {
     struct inode *inode = file_inode(file);
-    // struct super_block *sb = inode->i_sb;
-    // struct hk_sb_info *sbi = HK_SB(sb);
+    struct super_block *sb = inode->i_sb;
+    struct hk_sb_info *sbi = HK_SB(sb);
     struct hk_inode_info *si = HK_I(inode);
     struct hk_inode_info_header *psih = si->header;
+    u64 dentry_addr;
     unsigned long pos = 0;
     unsigned bkt;
     // int ret;
@@ -22,25 +23,26 @@ static int hk_readdir(struct file *file, struct dir_context *ctx) {
         goto out;
 
     /* Commit dots */
-    // if (!dir_emit_dots(file, ctx))
-    //     return 0;
+    if (!dir_emit_dots(file, ctx))
+        return 0;
 
     obj_ref_dentry_t *ref_dentry;
-    // struct hk_obj_dentry *obj_dentry;
-    // struct hk_inode_info_header *sih;
+    struct hk_obj_dentry *obj_dentry;
+    struct hk_inode_info_header *sih;
 
     hash_for_each(psih->dirs, bkt, ref_dentry, hnode) {
-        // TODO: Do not bother since we need to perform I/O for now
-        // obj_dentry =
-        //     (struct hk_obj_dentry *)get_ps_addr(sbi, ref_dentry->hdr.addr);
-        // sih = obj_mgr_get_imap_inode(sbi->obj_mgr, ref_dentry->target_ino);
-        // if (!dir_emit(ctx, obj_dentry->name, strlen(obj_dentry->name),
-        // sih->ino,
-        //               IF2DT(sih->i_mode))) {
-        //     hk_dbg("%s: dir_emit failed\n", __func__);
-        //     return -EIO;
-        // }
-        hk_notimpl();
+        dentry_addr = get_ps_addr(sbi, ref_dentry->hdr.addr);
+        sih = obj_mgr_get_imap_inode(sbi->obj_mgr, ref_dentry->target_ino);
+
+        obj_dentry = io_dispatch_mmap(
+            sbi, dentry_addr, sizeof(struct hk_obj_dentry), IO_D_PROT_READ);
+        if (!dir_emit(ctx, (const char *)obj_dentry->name,
+                      strlen((const char *)obj_dentry->name), sih->ino,
+                      IF2DT(sih->i_mode))) {
+            hk_dbg("%s: dir_emit failed\n", __func__);
+            return -EIO;
+        }
+        io_dispatch_munmap(sbi, obj_dentry);
     }
 
     ctx->pos = READDIR_END;

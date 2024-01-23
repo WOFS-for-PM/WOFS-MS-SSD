@@ -94,10 +94,7 @@ enum {
     Opt_uid,
     Opt_gid,
     Opt_dax,
-    Opt_meta_async,
-    Opt_meta_local,
-    Opt_meta_lfs,
-    Opt_meta_pack,
+    Opt_measure_timing,
     Opt_history_w,
     Opt_wprotect,
     Opt_err_cont,
@@ -114,10 +111,7 @@ static const match_table_t tokens = {
     {Opt_uid, "uid=%u"},
     {Opt_gid, "gid=%u"},
     {Opt_dax, "dax"},
-    {Opt_meta_async, "meta_async=%u"},
-    {Opt_meta_local, "meta_local"},
-    {Opt_meta_lfs, "meta_lfs"},
-    {Opt_meta_pack, "meta_pack"},
+    {Opt_measure_timing, "measure_timing"},
     {Opt_history_w, "history_w"},
     {Opt_wprotect, "wprotect"},
     {Opt_err_cont, "errors=continue"},
@@ -166,6 +160,9 @@ static int hk_parse_options(char *options, struct hk_sb_info *sbi,
                 break;
             case Opt_dax:
                 set_opt(sbi->s_mount_opt, DAX);
+                break;
+            case Opt_measure_timing:
+                measure_timing = 1;
                 break;
             case Opt_history_w:
                 set_opt(sbi->s_mount_opt, HISTORY_W);
@@ -235,6 +232,8 @@ static int hk_unregister_device_info(struct super_block *sb,
     int ret;
 
     for (int i = 0; i < sbi->cpus; i++) {
+        io_dispatch_drain(sbi, i);
+        io_dispatch_fence(sbi, i);
         ret = io_close(DEV_HANDLER_PTR(sbi, i));
         BUG_ON(ret);
         thread_data_cleanup(DEV_HANDLER_PTR(sbi, i));
@@ -260,6 +259,16 @@ static int hk_super_constants_init(struct hk_sb_info *sbi) {
     sbi->d_addr = sbi->fs_start;
     sbi->d_size = sbi->initsize - (sbi->d_addr - (u64)sbi->virt_addr);
     sbi->d_blks = sbi->d_size / HK_BLK_SZ;
+
+    if (!sbi->dax) {
+        sbi->hk_bms = (u8 *)kzalloc(sbi->bm_size, GFP_KERNEL);
+        if (!sbi->hk_bms) {
+            hk_err("failed to allocate bitmap\n");
+            return -ENOMEM;
+        }
+        hk_info("%s: allocated %llu bytes for bitmap\n", __func__,
+                sbi->bm_size);
+    }
 
     return 0;
 }
@@ -332,35 +341,64 @@ static void hk_set_blocksize(struct super_block *sb, unsigned long size) {
     sb->s_blocksize = (1 << bits);
 }
 
-// TODO:
+/* Update checksum for the DRAM copy */
+static inline void hk_update_super_crc(struct super_block *sb) {
+    struct hk_sb_info *sbi = HK_SB(sb);
+    u32 crc = 0;
+
+    sbi->hk_sb->s_wtime = get_seconds();
+    sbi->hk_sb->s_sum = 0;
+    crc = hk_crc32c(~0, (__u8 *)sbi->hk_sb + sizeof(__le32),
+                    sizeof(struct hk_super_block));
+    sbi->hk_sb->s_sum = crc;
+}
+
+static inline void hk_sync_super(struct super_block *sb) {
+    struct hk_sb_info *sbi = HK_SB(sb);
+    void *super, *super_redund;
+    int handle = 0;
+
+    super = hk_get_super(sb, KILLER_FIRST_SUPER_BLK);
+    handle = io_dispatch_write_thru(sbi, (u64)super, sbi->hk_sb, HK_BLK_SZ);
+    io_dispatch_fence(sbi, handle);
+
+    super_redund = hk_get_super(sb, KILLER_SECOND_SUPER_BLK);
+    handle =
+        io_dispatch_write_thru(sbi, (u64)super_redund, sbi->hk_sb, HK_BLK_SZ);
+    io_dispatch_fence(sbi, handle);
+}
+
+static int hk_format_meta(struct super_block *sb) {
+    struct hk_sb_info *sbi = HK_SB(sb);
+    int handle = io_dispatch_clear(sbi, sbi->bm_start, sbi->bm_size);
+    io_dispatch_fence(sbi, handle);
+    return 0;
+}
+
 static int hk_format_killer(struct super_block *sb) {
-    // struct hk_sb_info *sbi = HK_SB(sb);
-    // struct hk_super_block *super, *super_redund;
-    // unsigned long irq_flags = 0;
+    struct hk_sb_info *sbi = HK_SB(sb);
+    void *super, *super_redund;
+    int handle;
 
-    // super = hk_get_super(sb, HUNTER_FIRST_SUPER_BLK);
-    // hk_memunlock_super(sb, HUNTER_FIRST_SUPER_BLK, &irq_flags);
-    // memset_nt((void *)super, 0, HK_SB_SIZE(sbi));
-    // hk_memlock_super(sb, HUNTER_FIRST_SUPER_BLK, &irq_flags);
+    super = hk_get_super(sb, KILLER_FIRST_SUPER_BLK);
+    handle = io_dispatch_clear(sbi, (u64)super, HK_BLK_SZ);
+    io_dispatch_fence(sbi, handle);
 
-    // super_redund = hk_get_super(sb, HUNTER_SECOND_SUPER_BLK);
-    // hk_memunlock_super(sb, HUNTER_SECOND_SUPER_BLK, &irq_flags);
-    // memset_nt((void *)super_redund, 0, HK_SB_SIZE(sbi));
-    // hk_memlock_super(sb, HUNTER_SECOND_SUPER_BLK, &irq_flags);
+    super_redund = hk_get_super(sb, KILLER_SECOND_SUPER_BLK);
+    handle = io_dispatch_clear(sbi, (u64)super_redund, HK_BLK_SZ);
+    io_dispatch_fence(sbi, handle);
 
-    // hk_format_meta(sb);
+    hk_format_meta(sb);
     return 0;
 }
 
 static inline void hk_mount_over(struct super_block *sb) {
-    // struct hk_sb_info *sbi = HK_SB(sb);
+    struct hk_sb_info *sbi = HK_SB(sb);
 
-    // sbi->hk_sb->s_valid_umount = cpu_to_le32(HK_INVALID_UMOUNT);
-    // hk_update_super_crc(sb);
+    sbi->hk_sb->s_valid_umount = HK_INVALID_UMOUNT;
+    hk_update_super_crc(sb);
 
-    // hk_sync_super(sb);
-
-    // hk_info("MAX_GAP_BLKS_PER_LAYOUT: %llu\n", HK_MAX_GAPS_INRAM);
+    hk_sync_super(sb);
 }
 
 static int hk_init(struct super_block *sb, unsigned long size) {
@@ -382,14 +420,13 @@ static int hk_init(struct super_block *sb, unsigned long size) {
 
     hk_inode_mgr_prefault(sbi, sbi->inode_mgr);
 
-    // sbi->hk_sb->s_size = cpu_to_le64(size);
-    // sbi->hk_sb->s_blocksize = cpu_to_le32(blocksize);
-    // sbi->hk_sb->s_magic = cpu_to_le32(HUNTER_SUPER_MAGIC);
-    // sbi->s_inodes_used_count = 0;
-    // hk_update_super_crc(sb);
+    sbi->hk_sb->s_size = size;
+    sbi->hk_sb->s_blocksize = blocksize;
+    sbi->hk_sb->s_magic = KILLER_SUPER_MAGIC;
+    hk_update_super_crc(sb);
 
     /* Flush In-DRAM superblock into NVM */
-    // hk_sync_super(sb);
+    hk_sync_super(sb);
 
     in_pkg_param_t create_param;
     in_create_pkg_param_t in_create_param;
@@ -405,7 +442,7 @@ static int hk_init(struct super_block *sb, unsigned long size) {
     create_param.cur_pkg_addr = 0;
     create_param.bin = false;
 
-    ret = create_new_inode_pkg(sbi, 0x777 | S_IFDIR, "/", sbi->rih, NULL,
+    ret = create_new_inode_pkg(sbi, 0777 | S_IFDIR, "/", sbi->rih, NULL,
                                &create_param, &out_param);
 
     if (ret) {
@@ -507,8 +544,13 @@ out:
     return ret;
 }
 
+extern int hk_show_stats(void);
+
 void hk_put_super(struct super_block *sb) {
     struct hk_sb_info *sbi = HK_SB(sb);
+
+    if (measure_timing)
+        hk_show_stats();
 
     hk_unregister_device_info(sb, sbi);
 

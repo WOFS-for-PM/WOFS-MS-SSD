@@ -46,6 +46,12 @@
 
 #define access_ok(addr, size) 1
 
+static inline unsigned long get_seconds(void) {
+    struct timespec ts;
+    getrawmonotonic(&ts);
+    return ts.tv_sec;
+}
+
 // Basic types
 typedef __u8 u8;
 typedef __u16 u16;
@@ -378,12 +384,69 @@ struct inode {
         const unsigned int i_nlink;
         unsigned int __i_nlink;
     };
+    union {
+        // struct pipe_inode_info *i_pipe;
+        // struct cdev *i_cdev;
+        char *i_link;
+        unsigned i_dir_seq;
+    };
     unsigned long i_blocks;
 };
 
 struct delayed_call {
     void (*fn)(void *);
     void *arg;
+};
+
+#define timespec64 timespec
+
+/*
+ * Attribute flags.  These should be or-ed together to figure out what
+ * has been changed!
+ */
+#define ATTR_MODE (1 << 0)
+#define ATTR_UID (1 << 1)
+#define ATTR_GID (1 << 2)
+#define ATTR_SIZE (1 << 3)
+#define ATTR_ATIME (1 << 4)
+#define ATTR_MTIME (1 << 5)
+#define ATTR_CTIME (1 << 6)
+#define ATTR_ATIME_SET (1 << 7)
+#define ATTR_MTIME_SET (1 << 8)
+#define ATTR_FORCE (1 << 9) /* Not a change, but a change it */
+#define ATTR_KILL_SUID (1 << 11)
+#define ATTR_KILL_SGID (1 << 12)
+#define ATTR_FILE (1 << 13)
+#define ATTR_KILL_PRIV (1 << 14)
+#define ATTR_OPEN (1 << 15) /* Truncating from open(O_TRUNC) */
+#define ATTR_TIMES_SET (1 << 16)
+#define ATTR_TOUCH (1 << 17)
+
+/*
+ * This is the Inode Attributes structure, used for notify_change().  It
+ * uses the above definitions as flags, to know which values have changed.
+ * Also, in this manner, a Filesystem can look at only the values it cares
+ * about.  Basically, these are the attributes that the VFS layer can
+ * request to change from the FS layer.
+ *
+ * Derek Atkins <warlord@MIT.EDU> 94-10-20
+ */
+struct iattr {
+    unsigned int ia_valid;
+    umode_t ia_mode;
+    kuid_t ia_uid;
+    kgid_t ia_gid;
+    loff_t ia_size;
+    struct timespec64 ia_atime;
+    struct timespec64 ia_mtime;
+    struct timespec64 ia_ctime;
+
+    /*
+     * Not an attribute, but an auxiliary info for filesystems wanting to
+     * implement an ftruncate() like method.  NOTE: filesystem should
+     * check for (ia_valid & ATTR_FILE), and not for (ia_file != NULL).
+     */
+    struct file *ia_file;
 };
 
 struct inode_operations {
@@ -402,7 +465,32 @@ struct inode_operations {
     int (*mknod)(struct inode *, struct dentry *, umode_t, dev_t);
     int (*rename)(struct inode *, struct dentry *, struct inode *,
                   struct dentry *, unsigned int);
+
+    int (*setattr)(struct dentry *, struct iattr *);
 };
+
+static inline int setattr_prepare(struct dentry *dentry, struct iattr *attr) {
+    return 0;
+}
+
+static inline void setattr_copy(struct inode *inode, const struct iattr *attr) {
+    unsigned int ia_valid = attr->ia_valid;
+
+    if (ia_valid & ATTR_ATIME)
+        inode->i_atime = attr->ia_atime;
+    if (ia_valid & ATTR_MTIME)
+        inode->i_mtime = attr->ia_mtime;
+    if (ia_valid & ATTR_CTIME)
+        inode->i_ctime = attr->ia_ctime;
+    if (ia_valid & ATTR_MODE) {
+        umode_t mode = attr->ia_mode;
+        inode->i_mode = mode;
+    }
+}
+
+static inline void inode_dio_wait(struct inode *inode) {
+    return;
+}
 
 static inline void inode_init_once(struct inode *inode) {
     memset(inode, 0, sizeof(*inode));
@@ -543,6 +631,20 @@ static inline int insert_inode_locked(struct inode *inode) {
     return 0;
 }
 
+static inline void file_accessed(struct file *file) {
+}
+
+static inline unsigned long __must_check __clear_user(void __user *addr,
+                                                      unsigned long n) {
+    memset(addr, 0, n);
+    return n;
+}
+
+static __always_inline __must_check unsigned long __copy_to_user(
+    void __user *to, const void *from, unsigned long n) {
+    memcpy(to, from, n);
+    return 0;
+}
 /**
  * set_nlink - directly set an inode's link count
  * @inode: inode
@@ -616,6 +718,15 @@ static inline void i_size_write(struct inode *inode, loff_t i_size) {
 
 static inline int file_remove_privs(struct file *filp) {
     return 0;
+}
+
+static inline bool dir_emit_dots(struct file *file, struct dir_context *ctx) {
+    return true;
+}
+
+static inline bool dir_emit(struct dir_context *ctx, const char *name,
+                            int namelen, u64 ino, unsigned type) {
+    return ctx->actor(ctx, name, namelen, ctx->pos, ino, type);
 }
 
 static loff_t generic_file_llseek_size(struct file *file, loff_t offset,

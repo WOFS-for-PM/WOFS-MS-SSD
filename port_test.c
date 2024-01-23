@@ -213,8 +213,6 @@ DEFINE_UNIT_TEST_START(obj_test) {
 
         // create package
         in_param.bin = false;
-        // TODO: metadata block is pure log in non-dax mode, so that once
-        //       the metadata block is full, we flush-fence and invalidate
         create_data_pkg(sbi, sih, data_addr, offset, written_size, num,
                         &in_param, &out_param);
 
@@ -234,6 +232,7 @@ DEFINE_UNIT_TEST_START(obj_test) {
         offset += written_size;
 
         // flush the metadata block
+        // NOTE: this is redundant
         try_evict_meta_block(sbi, out_param.addr);
     }
 
@@ -349,24 +348,21 @@ DEFINE_UNIT_TEST_START(io_dispatch_test) {
     handle = io_dispatch_write_thru(sbi, 0, buf, strlen(buf));
     io_dispatch_fence(sbi, handle);
     io_dispatch_read(sbi, 0, read_buf, strlen(buf));
-    assert(!strcmp(buf, read_buf));
+    assert(!memcmp(buf, read_buf, strlen(buf)));
 
-    char *target_addr;
-    IO_DISPATCH_START_DAX_REGION_VALUE(sbi, 0, strlen(buf),
-                                       IO_DISPATCH_START_UPDATE, target_addr) {
-        target_addr[0] = 'g';
-        target_addr[5] = 'i';
-
-        region_handle = IO_DISPATCH_COMMIT_REGION_VALUE_SAFE(
-            sbi, 0, strlen(buf), (u64)target_addr);
-    }
-    IO_DISPATCH_END_DAX_REGION_VALUE();
+    char *target_addr =
+        io_dispatch_mmap(sbi, 0, strlen(buf), IO_D_PROT_WRITE | IO_D_PROT_READ);
+    target_addr[0] = 'g';
+    target_addr[5] = 'i';
+    region_handle =
+        io_dispatch_msync_safe(sbi, 0, strlen(buf), (u64)target_addr);
+    io_dispatch_munmap(sbi, target_addr);
 
     io_dispatch_flush(sbi, region_handle, 0, strlen(buf));
     io_dispatch_fence(sbi, region_handle);
 
     io_dispatch_read(sbi, 0, read_buf, strlen(buf));
-    assert(!strcmp(read_buf, "god, i am a test string"));
+    assert(!memcmp(read_buf, "god, i am a test string", strlen(buf)));
 }
 DEFINE_UNIT_TEST_END(io_dispatch_test)
 

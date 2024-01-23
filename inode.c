@@ -204,6 +204,8 @@ void hk_init_header(struct super_block *sb, struct hk_inode_info_header *sih,
     hash_init(sih->dirs);
     sih->i_num_dentrys = 0;
 
+    assert(i_mode != 0);
+
     sih->i_mode = i_mode;
     sih->i_flags = 0;
 
@@ -273,9 +275,10 @@ static int __hk_rebuild_dirs(struct hk_sb_info *sbi,
     d_root_t *root;
     d_obj_ref_list_t *dentry_list;
     struct list_head *pos;
-    // struct hk_obj_dentry *obj_dentry;
+    struct hk_obj_dentry *obj_dentry;
+    u64 obj_dentry_addr;
     obj_ref_dentry_t *ref;
-    // struct super_block *sb = sbi->sb;
+    struct super_block *sb = sbi->sb;
     int i, ret = 0;
 
     HK_ASSERT(S_ISDIR(sih->i_mode));
@@ -289,22 +292,24 @@ static int __hk_rebuild_dirs(struct hk_sb_info *sbi,
         if (dentry_list) {
             list_for_each(pos, &dentry_list->list) {
                 ref = list_entry(pos, obj_ref_dentry_t, node);
-                // TODO: Insert into dir table, since the name is in the
-                // storage, we need to perform I/O
-                // TODO: We may write more general I/O wrapper
-                // obj_dentry =
-                //     (struct hk_obj_dentry *)get_ps_addr(sbi, ref->hdr.addr);
+
                 if (ref->target_ino == ino && ino == HK_ROOT_INO) /* root */
                     continue;
-                hk_notimpl();
-                // ret = hk_insert_dir_table(sb, sih, obj_dentry->name,
-                //                           strlen(obj_dentry->name), ref);
-                // if (ret) {
-                //     hk_err(sb, "insert ref %p into dir table failed, ret
-                //     %d\n",
-                //            ref, ret);
-                //     return ret;
-                // }
+
+                obj_dentry_addr = get_ps_addr(sbi, ref->hdr.addr);
+                obj_dentry = io_dispatch_mmap(sbi, obj_dentry_addr,
+                                              sizeof(struct hk_obj_dentry),
+                                              IO_D_PROT_READ);
+                ret = hk_insert_dir_table(
+                    sb, sih, (const char *)obj_dentry->name,
+                    strlen((const char *)obj_dentry->name), ref);
+
+                if (ret) {
+                    hk_err("insert ref %p into dir table failed, ret %d\n ",
+                           ref, ret);
+                    return ret;
+                }
+                io_dispatch_munmap(sbi, obj_dentry);
             }
         }
         rls_droot(root, dentry);
@@ -344,6 +349,25 @@ static int __hk_rebuild_inode(struct super_block *sb, struct hk_inode_info *si,
     return ret;
 }
 
+static void hk_set_inode_flags(struct inode *inode, bool i_xattr,
+                               unsigned int flags) {
+    inode->i_flags &=
+        ~(S_SYNC | S_APPEND | S_IMMUTABLE | S_NOATIME | S_DIRSYNC);
+    if (flags & FS_SYNC_FL)
+        inode->i_flags |= S_SYNC;
+    if (flags & FS_APPEND_FL)
+        inode->i_flags |= S_APPEND;
+    if (flags & FS_IMMUTABLE_FL)
+        inode->i_flags |= S_IMMUTABLE;
+    if (flags & FS_NOATIME_FL)
+        inode->i_flags |= S_NOATIME;
+    if (flags & FS_DIRSYNC_FL)
+        inode->i_flags |= S_DIRSYNC;
+    if (!i_xattr)
+        inode_has_no_xattr(inode);
+    inode->i_flags |= S_DAX;
+}
+
 static int __hk_fill_vfs_inode(struct super_block *sb, struct inode *inode,
                                u64 ino) {
     struct hk_inode_info *si = HK_I(inode);
@@ -359,17 +383,15 @@ static int __hk_fill_vfs_inode(struct super_block *sb, struct inode *inode,
         goto bad_inode;
     }
 
-    // TODO: Do not bother storage entity now
-    // struct hk_obj_inode *obj_inode = (struct hk_obj_inode *)create_pkg_addr;
+    struct hk_obj_inode *obj_inode = io_dispatch_mmap(
+        sbi, create_pkg_addr, MTA_PKG_CREATE_SIZE, IO_D_PROT_READ);
 
     inode->i_mode = sih->i_mode;
 
-    // inode->i_generation = obj_inode->i_generation;
-    // hk_set_inode_flags(inode, obj_inode->i_xattr,
-    //                    le32_to_cpu(obj_inode->i_flags));
+    inode->i_generation = obj_inode->i_generation;
+    hk_set_inode_flags(inode, obj_inode->i_xattr, obj_inode->i_flags);
 
-    // inode->i_blocks = sih->i_blocks;
-    // inode->i_mapping->a_ops = &hk_aops_dax;
+    inode->i_blocks = sih->i_blocks;
 
     /* Update size and time after rebuild the tree */
     inode->i_size = sih->i_size;
@@ -379,8 +401,9 @@ static int __hk_fill_vfs_inode(struct super_block *sb, struct inode *inode,
     inode->i_atime.tv_nsec = inode->i_mtime.tv_nsec = inode->i_ctime.tv_nsec =
         0;
     set_nlink(inode, sih->i_links_count);
-    // rdev = le32_to_cpu(obj_inode->dev.rdev);
+    rdev = obj_inode->dev.rdev;
 
+    hk_dbg("inode(%d)->i_mode: %d\n", inode->i_ino, inode->i_mode);
     switch (inode->i_mode & S_IFMT) {
         case S_IFREG:
             inode->i_op = &hk_file_inode_operations;
@@ -400,30 +423,14 @@ static int __hk_fill_vfs_inode(struct super_block *sb, struct inode *inode,
             break;
     }
 
+    io_dispatch_munmap(sbi, obj_inode);
+
     return 0;
 
 bad_inode:
+    io_dispatch_munmap(sbi, obj_inode);
     make_bad_inode(inode);
     return ret;
-}
-
-static void hk_set_inode_flags(struct inode *inode, bool i_xattr,
-                               unsigned int flags) {
-    inode->i_flags &=
-        ~(S_SYNC | S_APPEND | S_IMMUTABLE | S_NOATIME | S_DIRSYNC);
-    if (flags & FS_SYNC_FL)
-        inode->i_flags |= S_SYNC;
-    if (flags & FS_APPEND_FL)
-        inode->i_flags |= S_APPEND;
-    if (flags & FS_IMMUTABLE_FL)
-        inode->i_flags |= S_IMMUTABLE;
-    if (flags & FS_NOATIME_FL)
-        inode->i_flags |= S_NOATIME;
-    if (flags & FS_DIRSYNC_FL)
-        inode->i_flags |= S_DIRSYNC;
-    if (!i_xattr)
-        inode_has_no_xattr(inode);
-    inode->i_flags |= S_DAX;
 }
 
 struct inode *hk_create_inode(enum hk_new_inode_type type, struct inode *dir,

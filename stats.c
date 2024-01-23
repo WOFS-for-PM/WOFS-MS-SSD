@@ -140,6 +140,14 @@ static void hk_clear_timing_stats(void) {
 atomic_uint_least64_t Timingstats_percpu[TIMING_NUM];
 atomic_uint_least64_t Countstats_percpu[TIMING_NUM];
 void hk_get_timing_stats(void) {
+    int i;
+
+    for (i = 0; i < TIMING_NUM; i++) {
+        Timingstats[i] =
+            atomic_load_explicit(&Timingstats_percpu[i], memory_order_relaxed);
+        Countstats[i] =
+            atomic_load_explicit(&Countstats_percpu[i], memory_order_relaxed);
+    }
 }
 static void hk_clear_timing_stats(void) {
 }

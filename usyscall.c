@@ -228,14 +228,37 @@ out:
     return ret;
 }
 
+long do_sys_ftruncate(unsigned int fd, loff_t length, int small) {
+    struct file *file = CURRENT.fdt[fd];
+    struct inode *inode = file->f_inode;
+    struct iattr newattrs;
+    int ret;
+
+    if (length < 0)
+        return -EINVAL;
+
+    newattrs.ia_size = length;
+    newattrs.ia_valid = ATTR_SIZE;
+
+    inode_lock(inode);
+
+    ret = inode->i_op->setattr(file->f_path.dentry, &newattrs);
+
+    inode_unlock(inode);
+
+    return ret;
+}
 // ================== usyscall ==================
-int usys_open(const char *pathname, int flags, ...) {
+int usys_open(const char *pathname, int flags, int mode) {
+    pr_debug("usys_open(%s)\n", pathname);
+
     int fd, ret;
     struct file *file;
     struct usys_open_frame frame = {.flags = flags, .path = pathname};
 
     if (flags & O_CREAT) {
         frame.flags |= O_CREAT;
+        frame.i_mode = mode | S_IFREG;
     }
 
     if (*pathname != '/') {
@@ -269,6 +292,7 @@ int usys_open(const char *pathname, int flags, ...) {
     file->private_data = kmalloc(strlen(pathname) + 1, GFP_KERNEL);
     // private_data as the pathname
     strcpy(file->private_data, pathname);
+    assert(file->f_op);
 
     CURRENT.fdt[fd] = file;
 
@@ -299,24 +323,32 @@ int usys_close(int fd) {
 }
 
 ssize_t usys_read(int fd, void *buf, size_t count) {
+    pr_debug("usys_read(%d, %p, %lu)\n", fd, buf, count);
+
     struct file *file = CURRENT.fdt[fd];
     ssize_t ret;
 
+    assert(file->f_op);
+    assert(file->f_op->read);
     ret = file->f_op->read(file, buf, count, &file->f_pos);
 
     return ret;
 }
 
 ssize_t usys_write(int fd, const void *buf, size_t count) {
+    pr_debug("usys_write(%d, %p, %lu)\n", fd, buf, count);
+
     struct file *file = CURRENT.fdt[fd];
     ssize_t ret;
 
+    assert(file->f_op);
+    assert(file->f_op->write);
     ret = file->f_op->write(file, buf, count, &file->f_pos);
 
     return ret;
 }
 
-int usys_lseek(int fd, int offset, int whence) {
+int usys_lseek(int fd, long offset, int whence) {
     struct file *file = CURRENT.fdt[fd];
     int ret;
 
@@ -327,6 +359,23 @@ int usys_lseek(int fd, int offset, int whence) {
     }
 
     return ret;
+}
+
+int usys_fsync(int fd) {
+    struct file *file = CURRENT.fdt[fd];
+    int ret;
+
+    if (file->f_op->fsync) {
+        ret = file->f_op->fsync(file, 0, file->f_inode->i_size, 1);
+    } else {
+        ret = 0;
+    }
+
+    return ret;
+}
+
+int usys_ftruncate(int fd, off_t len) {
+    return do_sys_ftruncate(fd, len, 1);
 }
 
 int usys_init(void) {

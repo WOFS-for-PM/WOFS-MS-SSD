@@ -13,23 +13,26 @@ int hk_insert_dir_table(struct super_block *sb,
 static void *__hk_search_dir_table(struct super_block *sb,
                                    struct hk_inode_info_header *sih,
                                    const char *name, int namelen) {
-    // struct hk_sb_info *sbi = HK_SB(sb);
-    void *cur = NULL;
+    struct hk_sb_info *sbi = HK_SB(sb);
+    obj_ref_dentry_t *ref_dentry = NULL;
+    struct hk_obj_dentry *dentry;
+    u64 dentry_addr;
     unsigned long hash;
+    void *cur = NULL;
 
     hash = BKDRHash(name, namelen);
 
-    obj_ref_dentry_t *ref_dentry = NULL;
-    // struct hk_obj_dentry *dentry;
     hash_for_each_possible(sih->dirs, ref_dentry, hnode, hash) {
-        // TODO: Blah, we just assume that the hash is unique
-        if (ref_dentry->hash != hash)
-            continue;
-        // dentry = get_pm_addr(sbi, ref_dentry->hdr.addr);
-        // if (strcmp(dentry->name, name) == 0) {
-        //     cur = ref_dentry;
-        //     break;
-        // }
+        dentry_addr = get_ps_addr(sbi, ref_dentry->hdr.addr);
+        dentry = io_dispatch_mmap(sbi, dentry_addr,
+                                  sizeof(struct hk_obj_dentry), IO_D_PROT_READ);
+        if (strcmp((const char *)dentry->name, name) == 0) {
+            cur = ref_dentry;
+            hk_dbg("%s: found %s\n", __func__, name);
+            io_dispatch_munmap(sbi, dentry);
+            break;
+        }
+        io_dispatch_munmap(sbi, dentry);
     }
 
     return cur;

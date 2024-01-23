@@ -1324,7 +1324,7 @@ unsigned long tlgc(tl_allocator_t *alloc, unsigned long max) {
         gced += blks_to_reclaim;
 
         // migrate nodes
-        // TODO: handle lock contention, be careful to
+        // NOTE: handle lock contention, be careful to
         //       use lock there
         // USE MACRO `TL_ALLOC_HINT_NO_LOCK`
         ret = meta_mgr->gc_ops->migration(alloc, &victim_list, m_alloc_type_idx,

@@ -30,11 +30,13 @@ int usys_fstatvfs(int fd, struct statvfs *buf);  // TODO
 
 int usys_fstatfs(int fd, struct statfs *buf);  // ******
 
+int usys_fsync(int fd);
+
 int usys_truncate(const char *path, off_t length);
 
 int usys_ftruncate(int fd, off_t len);
 
-int usys_open(const char *pathname, int flags, ...);
+int usys_open(const char *pathname, int flags, int mode);
 
 int usys_openat(int dirfd, const char *pathname, int flags, ...);
 
@@ -68,7 +70,7 @@ int usys_chdir(const char *path);  // TODO
 
 char *usys_getcwd(char *buf, int size);  // TODO
 
-int usys_lseek(int fd, int offset, int whence);  // ******
+int usys_lseek(int fd, long offset, int whence);  // ******
 
 int usys_access(const char *pathname, int mode);  // ******
 

@@ -69,14 +69,31 @@ ci-test: libkiller.so
 	sudo bash scripts/run_killer.sh tests/test
 	@echo "\033[32m\033[1m===== Done =====\n\033[0m"
 
-	@echo "\033[35m\033[1m===== FIO Tests =====\033[0m"
-	sudo bash scripts/run_killer.sh fio -filename=\a -fallocate=none -direct=0 -iodepth 1 -rw=write -ioengine=sync -bs=4K -size=128k -name=write
+	@echo "\033[35m\033[1m===== FIO Tests: WRITE =====\033[0m"
+	sudo bash scripts/run_killer.sh fio -filename=\a -fallocate=none -direct=0 -iodepth 1 -rw=write -ioengine=sync -bs=4K -size=128k -name=write -thread
+	@echo "\033[32m\033[1m===== Done =====\n\033[0m"
+
+	@echo "\033[35m\033[1m===== FIO Tests: RAND-WRITE =====\033[0m"
+	sudo bash scripts/run_killer.sh fio -filename=\a -fallocate=none -direct=0 -iodepth 1 -rw=randwrite -ioengine=sync -bs=4K -size=128k -name=randwrite -thread
+	@echo "\033[32m\033[1m===== Done =====\n\033[0m"
+
+	@echo "\033[35m\033[1m===== FIO Tests: READ =====\033[0m"
+	sudo bash scripts/run_killer.sh fio -filename=\a -fallocate=none -direct=0 -iodepth 1 -rw=read -ioengine=sync -bs=4K -size=128k -name=read -thread
 	@echo "\033[32m\033[1m===== Done =====\n\033[0m"
 
 perf-test: libkiller.so
 	make clean && make -j$(nproc)
-	@echo "\033[35m\033[1m===== FIO Perf Tests =====\033[0m"
-	sudo bash scripts/run_killer.sh fio -filename=\a -fallocate=none -direct=0 -iodepth 1 -rw=write -ioengine=sync -bs=4K -size=4G -name=write
+
+	@echo "\033[35m\033[1m===== FIO Perf Tests: WRITE =====\033[0m"
+	sudo bash scripts/run_killer.sh fio -filename=\a -fallocate=none -direct=0 -iodepth 1 -rw=write -ioengine=sync -bs=4K -size=4G -name=write -thread
+	@echo "\033[32m\033[1m===== Done =====\n\033[0m"
+
+	@echo "\033[35m\033[1m===== FIO Perf Tests: RAND-WRITE =====\033[0m"
+	sudo bash scripts/run_killer.sh fio -filename=\a -fallocate=none -direct=0 -iodepth 1 -rw=randwrite -ioengine=sync -bs=4K -size=4G -name=randwrite -thread
+	@echo "\033[32m\033[1m===== Done =====\n\033[0m"
+
+	@echo "\033[35m\033[1m===== FIO Perf Tests: READ =====\033[0m"
+	sudo bash scripts/run_killer.sh fio -filename=\a -fallocate=none -direct=0 -iodepth 1 -rw=read -ioengine=sync -bs=4K -size=4G -name=read -thread
 	@echo "\033[32m\033[1m===== Done =====\n\033[0m"
 
 fio-strace:

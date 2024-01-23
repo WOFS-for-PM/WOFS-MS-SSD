@@ -100,6 +100,7 @@ int io_fence(struct thread_data *td);
 int io_clwb(struct thread_data *td, off_t offset, size_t len);
 int io_wbinvd(struct thread_data *td, off_t offset, size_t len);
 int io_flush(struct thread_data *td, off_t offset, size_t len);
+int io_drain(struct thread_data *td);
 int io_test(void);
 
 #endif

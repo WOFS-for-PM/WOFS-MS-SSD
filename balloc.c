@@ -25,8 +25,7 @@ u64 hk_prepare_layout(struct super_block *sb, int cpuid, u64 blks,
     }
 
     if (zero) {
-        // TODO:
-        hk_notimpl();
+        io_dispatch_clear(sbi, target_addr, param._ret_allocated * HK_BLK_SZ);
     }
 
     if (!IS_ALIGNED(TRANS_ADDR_TO_OFS(sbi, target_addr), HK_BLK_SZ)) {
@@ -206,18 +205,16 @@ static int hk_migration(void *_alloc, struct list_head *victim_list,
     // use TL_NO_LOCK to avoid lock contention
     tl_allocator_t *alloc = (tl_allocator_t *)_alloc;
     struct hk_sb_info *sbi = (struct hk_sb_info *)alloc->private;
-    struct super_block *sb = sbi->sb;
     struct hk_layout_info *layout = &sbi->layouts[alloc->cpuid];
-    obj_mgr_t *mgr = sbi->obj_mgr;
-    u64 old_ps_addr = (u64)-1, ps_addr = 0, entry_addr;
     u16 m_alloc_type = idx_to_meta_type(m_alloc_type_idx);
     u32 entry_size = meta_type_to_size(m_alloc_type);
     u32 entries_perblk = HK_BLK_SZ / entry_size;
-    u32 num;
+    obj_mgr_t *mgr = sbi->obj_mgr;
+    u64 ps_addr = 0, entry_addr;
+    int ret, i, handle = 0;
     obj_ref_hdr_t *ref_hdr;
-    int ret, i;
+    u32 num;
 
-    // TODO: maintain reserve index for migration (file index)
     switch (m_alloc_type) {
         case TL_MTA_PKG_DATA:
             num = MTA_PKG_DATA_BLK;
@@ -237,62 +234,46 @@ static int hk_migration(void *_alloc, struct list_head *victim_list,
 
     list_for_each_entry(vict_node, victim_list, list) {
         node = vict_node->node;
-        if (sbi->dax) {
-            // TODO:
-        } else {
-            char block[HK_BLK_SZ], *p;
-            ret = io_read(CUR_DEV_HANDLER_PTR(sb), node->blk << HK_BLK_SZ_BITS,
-                          block, HK_BLK_SZ, O_IO_DROP);
-            assert(!ret);
+        char block[HK_BLK_SZ], *p;
+        io_dispatch_read(sbi, node->blk << HK_BLK_SZ_BITS, block, HK_BLK_SZ);
 
-            p = block;
-            for (i = 0; i < entries_perblk; i += entry_size) {
-                if (bm_test((u8 *)&node->mnode.bm, i)) {
-                    // The allocation is supposed to be successful
-                    // since the allocator is frozen and passed checks
-                    ret = reserve_pkg_space_in_layout(
-                        mgr, layout, &ps_addr, num,
-                        TL_ALLOC_HINT_NO_LOCK | m_alloc_type);
-                    assert(!ret);
-                    if (round_down(old_ps_addr, HK_BLK_SZ) !=
-                        round_down(ps_addr, HK_BLK_SZ)) {
-                        // we now evict the old ps_addr
-                        io_flush(CUR_DEV_HANDLER_PTR(sb), old_ps_addr,
-                                 HK_BLK_SZ);
-                        io_fence(CUR_DEV_HANDLER_PTR(sb));
-                    }
+        p = block;
+        for (i = 0; i < entries_perblk; i += entry_size) {
+            if (bm_test((u8 *)&node->mnode.bm, i)) {
+                // The allocation is supposed to be successful
+                // since the allocator is frozen and passed checks
+                ret = reserve_pkg_space_in_layout(
+                    mgr, layout, &ps_addr, num,
+                    TL_ALLOC_HINT_NO_LOCK | m_alloc_type);
+                assert(!ret);
 
-                    io_write(CUR_DEV_HANDLER_PTR(sb), ps_addr, p, entry_size,
-                             O_IO_CACHED);
+                handle = get_handle_by_addr(sbi, ps_addr);
+                io_dispatch_write_cached_handle(sbi, ps_addr, p, entry_size,
+                                                handle);
+                try_evict_meta_block(sbi, ps_addr);
 
-                    old_ps_addr = ps_addr;
+                // update reference for all entry
+                entry_addr = get_ps_entry_addr(sbi, node->blk, i);
+                ref_hdr =
+                    obj_mgr_get_obj2ref(mgr, get_ps_offset(sbi, entry_addr));
+                ret = obj_mgr_alter_obj2ref(mgr, ref_hdr,
+                                            get_ps_offset(sbi, ps_addr));
+                assert(!ret);
 
-                    // update reference for all entry
-                    entry_addr = get_ps_entry_addr(sbi, node->blk, i);
-                    ref_hdr = obj_mgr_get_obj2ref(
-                        mgr, get_ps_offset(sbi, entry_addr));
-                    ret = obj_mgr_alter_obj2ref(mgr, ref_hdr,
-                                                get_ps_offset(sbi, ps_addr));
-                    assert(!ret);
-
-                    // invalidate the old entry
-                    tl_build_free_param(
-                        &free_param, node->blk,
-                        ((u64)i << 32) | ((u32)entry_size),
-                        TL_MTA | m_alloc_type | TL_ALLOC_HINT_NO_LOCK);
-                    tlfree(alloc, &free_param);
-                }
-                p += entry_size;
+                // invalidate the old entry
+                tl_build_free_param(
+                    &free_param, node->blk, ((u64)i << 32) | ((u32)entry_size),
+                    TL_MTA | m_alloc_type | TL_ALLOC_HINT_NO_LOCK);
+                tlfree(alloc, &free_param);
             }
+            p += entry_size;
         }
     }
 
-    if (sbi->dax) {
-        // TODO:
-    } else {
-        io_flush(CUR_DEV_HANDLER_PTR(sb), ps_addr, HK_BLK_SZ);
-        io_fence(CUR_DEV_HANDLER_PTR(sb));
-    }
+    // flush + fence the remaining meta data
+    handle = get_handle_by_addr(sbi, ps_addr);
+    io_dispatch_flush(sbi, handle, ps_addr, HK_BLK_SZ);
+    io_dispatch_fence(sbi, handle);
 
     return 0;
 }

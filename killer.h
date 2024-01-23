@@ -112,6 +112,9 @@ void hk_init_header(struct super_block *sb, struct hk_inode_info_header *sih,
 extern const struct inode_operations hk_dir_inode_operations;
 extern const struct inode_operations hk_special_inode_operations;
 
+int hk_insert_dir_table(struct super_block *sb,
+                        struct hk_inode_info_header *sih, const char *name,
+                        int namelen, void *direntry);
 /* ======================= ANCHOR: bbuild.c ========================= */
 unsigned long hk_get_bm_size(struct super_block *sb);
 void hk_set_bm(struct hk_sb_info *sbi, u16 bmblk, u64 blk);
@@ -314,6 +317,16 @@ static inline __le32 hk_mask_flags(umode_t mode, __le32 flags) {
         return flags & HK_OTHER_FLMASK;
 }
 
+/* If this is part of a read-modify-write of the super block,
+ * hk_memunlock_super() before calling!
+ */
+static inline void *hk_get_super(struct super_block *sb, int n) {
+    struct hk_sb_info *sbi = HK_SB(sb);
+
+    return n == KILLER_FIRST_SUPER_BLK ? sbi->virt_addr
+                                       : (sbi->virt_addr + HK_BLK_SZ);
+}
+
 static inline void hk_flush_buffer(void *buf, uint32_t len, bool fence) {
     // uint32_t i;
 
@@ -346,24 +359,31 @@ static inline unsigned long BKDRHash(const char *str, int length) {
 #define rls_droot(droot, type) (spin_unlock(&droot->type##_lock))
 
 static inline int get_handle_by_addr(struct hk_sb_info *sbi, u64 addr);
+
 #include "io_dispatch.h"
 
 static inline void hk_unlock_bm(struct super_block *sb, u16 bmblk,
                                 unsigned long *flags) {
     struct hk_sb_info *sbi = HK_SB(sb);
-    void *addr = HK_BM_ADDR(sbi, bmblk);
-    u64 size = BMBLK_SIZE(sbi);
 
-    io_dispatch_unlock_range(sb, (void *)addr, size, flags);
+    if (sbi->dax) {
+        void *addr = HK_BM_ADDR(sbi, sbi->bm_start, bmblk);
+        u64 size = BMBLK_SIZE(sbi);
+
+        io_dispatch_unlock_range(sb, (void *)addr, size, flags);
+    }
 }
 
 static inline void hk_lock_bm(struct super_block *sb, u16 bmblk,
                               unsigned long *flags) {
     struct hk_sb_info *sbi = HK_SB(sb);
-    void *addr = HK_BM_ADDR(sbi, bmblk);
-    u64 size = BMBLK_SIZE(sbi);
 
-    io_dispatch_lock_range(sb, (void *)addr, size, flags);
+    if (sbi->dax) {
+        void *addr = HK_BM_ADDR(sbi, sbi->bm_start, bmblk);
+        u64 size = BMBLK_SIZE(sbi);
+
+        io_dispatch_lock_range(sb, (void *)addr, size, flags);
+    }
 }
 
 static inline int get_handle_by_addr(struct hk_sb_info *sbi, u64 addr) {
@@ -392,12 +412,19 @@ static void inline try_evict_meta_block(struct hk_sb_info *sbi,
         io_dispatch_flush(sbi, handle,
                           round_down(last_entry_addr, KILLER_BLK_SIZE),
                           KILLER_BLK_SIZE);
-        io_dispatch_fence(sbi, handle);
 #else
         hk_err("invalid mode, cur handle %d\n", handle);
         BUG_ON(1);
 #endif
+        io_dispatch_fence(sbi, handle);
     }
+}
+
+static void inline try_sync_meta_entry(struct hk_sb_info *sbi, u64 entry_addr,
+                                       u64 entry_size) {
+    int handle = get_handle_by_addr(sbi, entry_addr);
+    io_dispatch_clwb(sbi, handle, entry_addr, entry_size);
+    io_dispatch_fence(sbi, handle);
 }
 
 #endif

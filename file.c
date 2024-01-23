@@ -3,6 +3,119 @@
 
 #include "killer.h"
 
+static ssize_t do_hk_file_read(struct file *filp, char __user *buf, size_t len,
+                               loff_t *ppos) {
+    struct inode *inode = file_inode(filp);
+    struct super_block *sb = inode->i_sb;
+    struct hk_sb_info *sbi = HK_SB(sb);
+    struct hk_inode_info *si = HK_I(inode);
+    struct hk_inode_info_header *sih = si->header;
+    unsigned long index, end_index;
+    unsigned long offset;
+    loff_t isize, pos;
+    size_t copied = 0;
+    size_t error = 0;
+
+    INIT_TIMING(io_time);
+
+    pos = *ppos;
+    index = pos >> PAGE_SHIFT; /* Start from which blk */
+    offset = pos & ~PAGE_MASK; /* Start from ofs to the blk */
+
+    if (!access_ok(buf, len)) {
+        error = -EFAULT;
+        goto out;
+    }
+
+    isize = i_size_read(inode); /* Get file size */
+    if (!isize)
+        goto out;
+
+    hk_dbg("%s: inode %lu, offset %lld, count %lu, size %lld\n", __func__,
+           inode->i_ino, pos, len, isize);
+
+    if (len > isize - pos)
+        len = isize - pos;
+
+    if (len <= 0)
+        goto out;
+
+    end_index = (isize - 1) >> PAGE_SHIFT;
+
+    do {
+        unsigned long nr, left;
+        unsigned long blk_addr;
+        void *content = NULL;
+        bool zero = false;
+
+        /* nr is the maximum number of bytes to copy from this page */
+        if (index >= end_index) {
+            if (index > end_index)
+                goto out;
+            nr = ((isize - 1) & ~PAGE_MASK) + 1;
+            if (nr <= offset)
+                goto out;
+        }
+
+        obj_ref_data_t *ref = NULL;
+        ref = (obj_ref_data_t *)hk_inode_get_slot(sih, (index << PAGE_SHIFT));
+        if (unlikely(ref == NULL)) {
+            blk_addr = 0;
+            hk_dbg("%s: index: %d, ref is NULL\n", __func__, index);
+            nr = PAGE_SIZE;
+            zero = true;
+        } else {
+            blk_addr = get_ps_addr_by_data_ref(sbi, ref, (index << PAGE_SHIFT));
+            if (DATA_IS_HOLE(ref->type)) { /* It's a file hole */
+                zero = true;
+            }
+            nr = (((u64)ref->num) - (index - (ref->ofs >> HK_BLK_SZ_BITS))) *
+                 HK_BLK_SZ;
+        }
+
+        nr = nr - offset;
+        if (nr > len - copied)
+            nr = len - copied;
+
+        HK_START_TIMING(memcpy_r_media_t, io_time);
+
+        hk_dbg("%s: index: %d, blk_addr: 0x%llx, content: 0x%llx, zero: %d, "
+               "nr: 0x%lx\n",
+               __func__, index, blk_addr, content, zero, nr);
+
+        if (!zero) {
+            /* prefetch per 256 */
+            content =
+                io_dispatch_mmap(sbi, blk_addr, HK_BLK_SZ, IO_D_PROT_READ);
+            left = __copy_to_user(buf + copied, content + offset, nr);
+            io_dispatch_munmap(sbi, content);
+        } else {
+            left = __clear_user(buf + copied, nr);
+        }
+
+        HK_END_TIMING(memcpy_r_media_t, io_time);
+
+        if (left) {
+            hk_dbg("%s ERROR!: bytes %lu, left %lu\n", __func__, nr, left);
+            error = -EFAULT;
+            goto out;
+        }
+
+        copied += nr;
+        offset += nr;
+        index += offset >> PAGE_SHIFT;
+        offset &= ~PAGE_MASK;
+    } while (copied < len);
+
+out:
+    *ppos = pos + copied;
+    if (filp)
+        file_accessed(filp);
+
+    hk_dbg("%s returned %zu\n", __func__, copied);
+    return copied ? copied : error;
+}
+
 /* Check whether partial content can be written in the allocated block. */
 /* `overflow` indicates that the [pos, pos + len) can not be written */
 /* in the current block. */
@@ -93,9 +206,8 @@ static bool hk_try_cow(struct hk_inode_info *si, u64 cur_addr, u64 index,
     struct hk_sb_info *sbi = HK_SB(sb);
     struct hk_inode_info_header *sih = si->header;
     bool is_overlay = false;
-    u64 blk_addr;
     u32 blks_to_write = 0;
-    unsigned long irq_flags = 0;
+    u64 blk_addr;
     INIT_TIMING(partial_time);
 
     HK_START_TIMING(partial_block_t, partial_time);
@@ -138,10 +250,7 @@ static bool hk_try_cow(struct hk_inode_info *si, u64 cur_addr, u64 index,
         }
     } else {
         if (index == start_index && each_ofs != 0) {
-            io_dispatch_unlock_range(sb, (void *)cur_addr, each_ofs,
-                                     &irq_flags);
             io_dispatch_clear(sbi, cur_addr, each_ofs);
-            io_dispatch_lock_range(sb, (void *)cur_addr, each_ofs, &irq_flags);
             *each_size -= each_ofs;
         }
         blks_to_write = GET_ALIGNED_BLKNR(*each_size + each_ofs - 1);
@@ -350,7 +459,19 @@ int hk_open(struct inode *inode, struct file *filp) {
 
 ssize_t hk_file_read(struct file *filp, char __user *buf, size_t len,
                      loff_t *ppos) {
-    return 0;
+    struct inode *inode = file_inode(filp);
+    ssize_t ret;
+    INIT_TIMING(time);
+
+    HK_START_TIMING(read_t, time);
+    inode_lock_shared(inode);
+
+    ret = do_hk_file_read(filp, buf, len, ppos);
+
+    inode_unlock_shared(inode);
+    HK_END_TIMING(read_t, time);
+
+    return ret;
 }
 
 ssize_t hk_file_write(struct file *filp, const char __user *buf, size_t len,
@@ -365,10 +486,10 @@ ssize_t hk_file_write(struct file *filp, const char __user *buf, size_t len,
     inode_lock(inode);
 
     ret = do_hk_file_write(filp, buf, len, ppos);
+    assert(ret != 0);
 
     inode_unlock(inode);
     sb_end_write(inode->i_sb);
-
     return ret;
 }
 
@@ -379,7 +500,239 @@ static loff_t hk_llseek(struct file *filp, loff_t offset, int whence) {
     return -EINVAL;
 }
 
-const struct inode_operations hk_file_inode_operations;
+static int hk_fsync(struct file *file, loff_t start, loff_t end, int datasync) {
+    int ret = 0;
+    INIT_TIMING(fsync_time);
+
+    HK_START_TIMING(fsync_t, fsync_time);
+
+#ifdef MODE_ASYNC
+    pr_warn("start sync\n");
+    struct inode *inode = file_inode(file);
+    struct super_block *sb = inode->i_sb;
+    struct hk_sb_info *sbi = HK_SB(sb);
+    struct hk_inode_info_header *sih = HK_IH(inode);
+    unsigned long start_index, end_index, index;
+    u64 create_pkg_addr;
+    u64 data_pkg_addr;
+    u64 attr_pkg_addr;
+    u64 blk_addr;
+    int handle;
+
+    inode_lock(inode);
+
+    start_index = start >> PAGE_SHIFT;
+    end_index = (end - 1) >> PAGE_SHIFT;
+    index = start_index;
+
+    // sync data and data pkg
+    while (index <= end_index) {
+        obj_ref_data_t *ref = NULL;
+        ref = (obj_ref_data_t *)hk_inode_get_slot(HK_IH(inode),
+                                                  (index << HK_BLK_SZ_BITS));
+
+        blk_addr = get_ps_addr_by_data_ref(sbi, ref, (index << HK_BLK_SZ_BITS));
+        handle = get_handle_by_addr(sbi, blk_addr);
+        // wait for io to complete
+        io_dispatch_fence(sbi, handle);
+
+        data_pkg_addr = get_ps_addr(sbi, ref->hdr.addr);
+        try_sync_meta_entry(sbi, data_pkg_addr, MTA_PKG_DATA_SIZE);
+
+        index++;
+    }
+
+    // sync metadata
+    if (sih->latest_fop.latest_inode) {
+        create_pkg_addr =
+            get_ps_addr(sbi, sih->latest_fop.latest_inode->hdr.addr);
+        try_sync_meta_entry(sbi, create_pkg_addr, MTA_PKG_CREATE_SIZE);
+    }
+
+    if (sih->latest_fop.latest_attr) {
+        attr_pkg_addr = get_ps_addr(sbi, sih->latest_fop.latest_attr->hdr.addr);
+        try_sync_meta_entry(sbi, attr_pkg_addr, MTA_PKG_ATTR_SIZE);
+    }
+
+    inode_unlock(inode);
+#endif
+
+    HK_END_TIMING(fsync_t, fsync_time);
+
+    return ret;
+}
+
+static int __hk_handle_setattr_operation(struct super_block *sb,
+                                         struct inode *inode,
+                                         unsigned int ia_valid,
+                                         struct iattr *attr) {
+    struct hk_inode_info *si = HK_I(inode);
+    struct hk_inode_info_header *sih = si->header;
+    struct hk_sb_info *sbi = HK_SB(sb);
+    int ret = 0;
+
+    if (ia_valid & ATTR_MODE)
+        sih->i_mode = inode->i_mode;
+
+    in_pkg_param_t param;
+    out_pkg_param_t out_param;
+
+    ret = create_attr_pkg(sbi, sih, 0, attr->ia_size - inode->i_size, &param,
+                          &out_param);
+
+    return ret;
+}
+
+/*
+ * Zero the tail page. Used in resize request
+ * to avoid to keep data in case the file grows again.
+ */
+static void __hk_prepare_truncate(struct super_block *sb, struct inode *inode,
+                                  loff_t newsize) {
+    struct hk_sb_info *sbi = HK_SB(sb);
+    struct hk_inode_info *si = HK_I(inode);
+    struct hk_inode_info_header *sih = si->header;
+    unsigned long offset = newsize & (sb->s_blocksize - 1);
+    unsigned long index, length;
+    int handle;
+    u64 addr;
+
+    if (offset == 0 || newsize > inode->i_size)
+        return;
+
+    length = sb->s_blocksize - offset;
+    index = newsize >> sb->s_blocksize_bits;
+
+    obj_ref_data_t *ref = NULL;
+    ref = (obj_ref_data_t *)hk_inode_get_slot(sih, index << HK_BLK_SZ_BITS);
+    addr = get_ps_addr_by_data_ref(sbi, ref, index << HK_BLK_SZ_BITS);
+
+    if (addr == 0)
+        return;
+
+    // NOTE: the data @ addr could be not written yet
+    //       we must wait to ensure the data is consistent
+    handle = get_handle_by_addr(sbi, addr);
+    io_dispatch_fence(sbi, handle);
+
+    io_dispatch_clear(sbi, addr + offset, length);
+}
+
+/*
+ * Free data blocks from inode in the range start <=> end
+ */
+static void hk_truncate_file_blocks(struct inode *inode, loff_t start,
+                                    loff_t end) {
+    struct super_block *sb = inode->i_sb;
+    struct hk_sb_info *sbi = HK_SB(sb);
+    struct hk_inode_info *si = HK_I(inode);
+    struct hk_inode_info_header *sih = si->header;
+    unsigned int data_bits = sb->s_blocksize_bits;
+    s64 start_index, end_index;
+    int freed = 0;
+
+    inode->i_mtime = inode->i_ctime = current_time(inode);
+
+    start_index = (start + (1UL << data_bits) - 1) >> data_bits;
+
+    if (end == 0)
+        return;
+    end_index = (end - 1) >> data_bits;
+
+    if (start_index > end_index)
+        return;
+
+    obj_mgr_t *obj_mgr = sbi->obj_mgr;
+    data_update_t update;
+
+    update.ofs = start_index << PAGE_SHIFT;
+    update.num = end_index - start_index + 1;
+
+    while (reclaim_dram_data(obj_mgr, sih, &update) == -EAGAIN) {
+        ;
+    }
+
+    freed = update.num;
+
+    inode->i_blocks -= (freed * (1 << (data_bits - sb->s_blocksize_bits)));
+
+    sih->i_blocks = inode->i_blocks;
+}
+
+static void __hk_setsize(struct inode *inode, loff_t oldsize, loff_t newsize) {
+    struct super_block *sb = inode->i_sb;
+    struct hk_inode_info_header *sih = HK_IH(inode);
+    INIT_TIMING(setsize_time);
+
+    /* We only support truncate regular file */
+    if (!(S_ISREG(inode->i_mode))) {
+        hk_err("%s: wrong file mode %d\n", __func__, inode->i_mode);
+        return;
+    }
+
+    HK_START_TIMING(setsize_t, setsize_time);
+
+    inode_dio_wait(inode);
+
+    hk_dbg("%s: inode %lu, old size %llu, new size %llu\n", __func__,
+           inode->i_ino, oldsize, newsize);
+
+    if (newsize != oldsize) {
+        __hk_prepare_truncate(sb, inode, newsize);
+        i_size_write(inode, newsize);
+        sih->i_size = newsize;
+    }
+
+    hk_truncate_file_blocks(inode, newsize, oldsize);
+    HK_END_TIMING(setsize_t, setsize_time);
+}
+
+static int hk_notify_change(struct dentry *dentry, struct iattr *attr) {
+    struct inode *inode = dentry->d_inode;
+    struct hk_inode_info *si = HK_I(inode);
+    struct hk_inode_info_header *sih = si->header;
+    struct super_block *sb = inode->i_sb;
+    int ret;
+    unsigned int ia_valid = attr->ia_valid, attr_mask;
+    loff_t oldsize = inode->i_size;
+    INIT_TIMING(setattr_time);
+
+    HK_START_TIMING(setattr_t, setattr_time);
+
+    ret = setattr_prepare(dentry, attr);
+    if (ret)
+        goto out;
+
+    /* Update inode with attr except for size */
+    setattr_copy(inode, attr);
+
+    attr_mask = ATTR_MODE | ATTR_UID | ATTR_GID | ATTR_SIZE | ATTR_ATIME |
+                ATTR_MTIME | ATTR_CTIME;
+
+    ia_valid = ia_valid & attr_mask;
+
+    if (ia_valid == 0)
+        goto out;
+
+    ret = __hk_handle_setattr_operation(sb, inode, ia_valid, attr);
+    if (ret)
+        goto out;
+
+    /* Only after setattr entry is committed, we can truncate size */
+    if ((ia_valid & ATTR_SIZE) &&
+        (attr->ia_size != oldsize || sih->i_flags & HK_EOFBLOCKS_FL)) {
+        __hk_setsize(inode, oldsize, attr->ia_size);
+    }
+
+out:
+    HK_END_TIMING(setattr_t, setattr_time);
+    return ret;
+}
+
+const struct inode_operations hk_file_inode_operations = {
+    .setattr = hk_notify_change,
+    .create = NULL,
+};
 
 const struct file_operations hk_file_operations = {
     .llseek = hk_llseek,
@@ -390,7 +743,7 @@ const struct file_operations hk_file_operations = {
     // .mmap = NULL, /* TODO: Not support mmap yet */
     // .mmap_supported_flags = MAP_SYNC,
     .open = hk_open,
-    // .fsync = hk_fsync,
+    .fsync = hk_fsync,
     // .flush = hk_flush,
     // .unlocked_ioctl = hk_ioctl,
     .fallocate = NULL, /* TODO: Not support yet */

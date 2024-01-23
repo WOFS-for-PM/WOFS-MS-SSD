@@ -1,5 +1,6 @@
 #ifndef _HK_CONFIG_H
 #define _HK_CONFIG_H
+#ifndef __KERNEL__
 
 #define _GNU_SOURCE
 #include <assert.h>
@@ -66,8 +67,11 @@
 #ifndef IO_DEPTH
 #define IO_DEPTH num_online_cpus()
 #endif  // IO_DEPTH
+#endif
 
 #define KILLER_SUPER_BLKS 2
+#define KILLER_FIRST_SUPER_BLK 0
+#define KILLER_SECOND_SUPER_BLK 1
 
 #define KILLER_SUPER_MAGIC 0x4b494c4c  // "KILL" in ascii
 #define KILLER_OBJ_MAGIC 0x4b4f424a    // "KOBJ" in ascii
@@ -89,9 +93,13 @@
 #define KILLER_MOUNT_HISTORY_W 0x008000 /* History window for file open */
 
 #define POSSIBLE_MAX_CPU 1024
+
 /*
  * HUNTER-KILLER CONFIGURATIONS
  */
+#define HK_VALID_UMOUNT 0xffffffff
+#define HK_INVALID_UMOUNT 0x00000000
+#define HK_EOFBLOCKS_FL 0x20000000
 #define HK_BLK_SZ_BITS 12
 #define HK_BLK_SZ (1 << HK_BLK_SZ_BITS)
 #define HK_NUM_INO (1024 * 1024)

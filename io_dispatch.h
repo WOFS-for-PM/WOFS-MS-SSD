@@ -80,42 +80,59 @@ static inline void io_dispatch_lock_range(struct super_block *sb, void *p,
     }
 }
 
-#define IO_DISPATCH_START_WRITE 0
-#define IO_DISPATCH_START_UPDATE 1
-#define IO_DISPATCH_START_READ 2
+#define IO_D_PROT_WRITE 0x0001
+#define IO_D_PROT_READ 0x0002
 
-#define IO_DISPATCH_DAX_REGION_SIZE 4096
+#define IO_D_MAX_MMAP_SIZE 4096
 
-#define IO_DISPATCH_START_DAX_REGION_VALUE(sbi, dev_addr, size, mode, \
-                                           target_addr)               \
-    {                                                                 \
-        if (sbi->dax) {                                               \
-            target_addr = (typeof(target_addr))dev_addr;              \
-        } else {                                                      \
-            int handle = hk_get_cpuid(sbi->sb);                       \
-            assert(size <= sbi->fast_dev.tds[handle].bs);             \
-            assert(sbi->fast_dev.tds[handle].bs <=                    \
-                   IO_DISPATCH_DAX_REGION_SIZE);                      \
-            char buf[IO_DISPATCH_DAX_REGION_SIZE];                    \
-            target_addr = (typeof(target_addr))buf;                   \
-            /* must read first if mode is IO_DISPATCH_START_UPDATE or \
-             * IO_DISPATCH_START_READ*/                               \
-            if (mode == IO_DISPATCH_START_UPDATE ||                   \
-                mode == IO_DISPATCH_START_READ) {                     \
-                io_read(DEV_HANDLER_PTR(sbi, handle), dev_addr, buf,  \
-                        sbi->fast_dev.tds[handle].bs, O_IO_DROP);     \
-            }                                                         \
+#define IO_DISPATCH_MMAP(sbi, dev_addr, size, prot, target_addr)        \
+    {                                                                   \
+        if (sbi->dax) {                                                 \
+            target_addr = (typeof(target_addr))dev_addr;                \
+        } else {                                                        \
+            int handle = get_handle_by_addr(sbi, (u64)dev_addr);        \
+            assert(size <= sbi->fast_dev.tds[handle].bs);               \
+            assert(sbi->fast_dev.tds[handle].bs <= IO_D_MAX_MMAP_SIZE); \
+            char buf[IO_D_MAX_MMAP_SIZE];                               \
+            target_addr = (typeof(target_addr))buf;                     \
+            /* must read first if prot require                          \
+             * IO_D_PROT_READ*/                                         \
+            if ((prot & IO_D_PROT_READ)) {                              \
+                io_read(DEV_HANDLER_PTR(sbi, handle), dev_addr, buf,    \
+                        sbi->fast_dev.tds[handle].bs, O_IO_DROP);       \
+            }                                                           \
         }
+
+// FIXME: for the prot that requires IO_D_PROT_READ, there exists double-copy
+// problem, a possible solution is add another io_read to directly manipulate
+// io_u buffer, and sync turn the read buffer as write to accomplish this task.
+// TODO: add io_rmw() to avoid double-copy
+static inline void *io_dispatch_mmap(struct hk_sb_info *sbi, u64 dev_addr,
+                                     u64 size, int prot) {
+    void *target_addr = NULL;
+    if (sbi->dax) {
+        target_addr = (typeof(target_addr))dev_addr;
+    } else {
+        int handle = get_handle_by_addr(sbi, (u64)dev_addr);
+        target_addr = kmalloc(size, GFP_KERNEL);
+        if ((prot & IO_D_PROT_READ)) {
+            io_read(DEV_HANDLER_PTR(sbi, handle), dev_addr, target_addr, size,
+                    O_IO_DROP);
+        }
+    }
+    return target_addr;
+}
+
 // manipulate `target_addr` here like normal memory
+
 // commit the modifed region
-static inline int IO_DISPATCH_COMMIT_REGION_VALUE(struct hk_sb_info *sbi,
-                                                  u64 dev_addr, u64 size,
-                                                  u64 target_addr) {
+static inline int io_dispatch_msync(struct hk_sb_info *sbi, u64 dev_addr,
+                                    u64 size, u64 target_addr) {
     int region_handle = 0;
     if (sbi->dax) {
         hk_flush_buffer((void *)dev_addr, size, true);
     } else {
-        get_handle_by_addr(sbi, (u64)dev_addr);
+        region_handle = get_handle_by_addr(sbi, (u64)dev_addr);
         assert(region_handle >= 0);
         io_write(DEV_HANDLER_PTR(sbi, region_handle), (off_t)dev_addr,
                  (void *)target_addr, size, O_IO_CACHED);
@@ -126,17 +143,27 @@ static inline int IO_DISPATCH_COMMIT_REGION_VALUE(struct hk_sb_info *sbi,
     }
     return region_handle;
 }
-#define IO_DISPATCH_COMMIT_REGION_VALUE_SAFE(sbi, dev_addr, size, target_addr) \
-    ({                                                                         \
-        int region_handle = 0;                                                 \
-        unsigned long irq_flags = 0;                                           \
-        io_dispatch_unlock_range(sbi->sb, (void *)dev_addr, size, &irq_flags); \
-        region_handle =                                                        \
-            IO_DISPATCH_COMMIT_REGION_VALUE(sbi, dev_addr, size, target_addr); \
-        io_dispatch_lock_range(sbi->sb, (void *)dev_addr, size, &irq_flags);   \
-        region_handle;                                                         \
-    })
-#define IO_DISPATCH_END_DAX_REGION_VALUE(sbi) }
+
+static inline int io_dispatch_msync_safe(struct hk_sb_info *sbi, u64 dev_addr,
+                                         u64 size, u64 target_addr) {
+    int region_handle = 0;
+    unsigned long irq_flags = 0;
+    io_dispatch_unlock_range(sbi->sb, (void *)dev_addr, size, &irq_flags);
+    region_handle = io_dispatch_msync(sbi, dev_addr, size, target_addr);
+    io_dispatch_lock_range(sbi->sb, (void *)dev_addr, size, &irq_flags);
+    return region_handle;
+}
+
+#define IO_DISPATCH_MUNMAP(sbi) }
+
+static inline void io_dispatch_munmap(struct hk_sb_info *sbi,
+                                      void *target_addr) {
+    if (sbi->dax) {
+        // Do nothing
+    } else {
+        kfree(target_addr);
+    }
+}
 
 static inline void io_dispatch_wbinvd(struct hk_sb_info *sbi, int handle,
                                       u64 dev_addr, size_t size) {
@@ -178,6 +205,14 @@ static inline void io_dispatch_fence(struct hk_sb_info *sbi, int handle) {
     }
 }
 
+static inline void io_dispatch_drain(struct hk_sb_info *sbi, int handle) {
+    if (sbi->dax) {
+        // Do nothing
+    } else {
+        io_drain(DEV_HANDLER_PTR(sbi, handle));
+    }
+}
+
 static inline void io_dispatch_read(struct hk_sb_info *sbi, u64 dev_addr,
                                     void *dst, size_t size) {
     if (sbi->dax) {
@@ -197,16 +232,18 @@ static inline void io_dispatch_copy(struct hk_sb_info *sbi, u64 dev_dst_addr,
                                size);
     } else {
         char *buf = kmalloc(size, GFP_KERNEL);
+        int handle = get_handle_by_addr(sbi, (u64)dev_src_addr);
         io_read(CUR_DEV_HANDLER_PTR(sbi->sb), dev_src_addr, buf, size,
                 O_IO_DROP);
-        io_write(CUR_DEV_HANDLER_PTR(sbi->sb), dev_dst_addr, buf, size,
+
+        io_write(DEV_HANDLER_PTR(sbi, handle), dev_dst_addr, buf, size,
                  O_IO_DROP);
         kfree(buf);
     }
     io_dispatch_lock_range(sbi->sb, (void *)dev_dst_addr, size, &irq_flags);
 }
 
-void io_dispatch_clear(struct hk_sb_info *sbi, u64 dev_addr, size_t size);
+int io_dispatch_clear(struct hk_sb_info *sbi, u64 dev_addr, size_t size);
 int io_dispatch_write_thru(struct hk_sb_info *sbi, u64 dev_addr, void *src,
                            size_t size);
 int io_dispatch_write_thru_handle(struct hk_sb_info *sbi, u64 dev_addr,
