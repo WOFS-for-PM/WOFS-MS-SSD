@@ -110,6 +110,15 @@ kmod:
 kmod-clean:
 	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=`pwd` clean
 
+CODES := $(shell find $(LIB_DIR) -maxdepth 1 -name "*.c" )
+CODES += $(shell find $(LIB_DIR)/backend -name "*.c")
+CODES += $(shell find $(LIB_DIR) -maxdepth 1 -name "*.h" )
+CODES += $(shell find $(LIB_DIR)/backend -name "*.h")
+CODES += $(LIB_DIR)/linux/linux_port.h
+
+LOC:
+	@find $(CODES) -type f -print | xargs wc -l
+
 ugdb:
 	sudo gdb -x scripts/.gdbinit $(shell pwd)/tests/test
 
