@@ -1,0 +1,7 @@
+*
+!Makefile
+!.gitignore
+!*.h
+!*.c
+!*.sh
+!*.py

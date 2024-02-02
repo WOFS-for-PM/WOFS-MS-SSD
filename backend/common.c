@@ -4,7 +4,6 @@
 
 #include "common.h"
 #include "linux/kernel.h"
-#include "tlalloc.h"
 
 #define PREDEFINED_PAGE_SIZE 4096
 #define PREDEFINED_CACHE_LINE_SIZE 64
@@ -692,6 +691,8 @@ int io_read(struct thread_data *td, off_t offset, char *buf, size_t len,
     }
 
     if (r != 0) {
+        // reap write now
+        r = td->inflight;
         pr_debug("%s: perform %d I/O from device\n", __func__, r);
         __io_reap(td, r, td->iodepth, __io_reap_for_reader, &d);
     }
@@ -1107,6 +1108,10 @@ DEFINE_UNIT_TEST(__wofs_bench, {
         free(meta_regions);
         io_fence(td);
     }
+})
+
+DEFINE_UNIT_TEST(__urfs_bench, {
+    
 })
 
 int io_test(void) {
