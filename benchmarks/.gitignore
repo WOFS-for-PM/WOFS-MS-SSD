@@ -5,3 +5,4 @@
 !*.c
 !*.sh
 !*.py
+!performance-comparsion-table*
