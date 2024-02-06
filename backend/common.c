@@ -19,6 +19,16 @@
 #define pr_fmt(fmt) GREEN BOLD "[IOCOMMON]: " BLACK fmt
 #endif
 
+#define _mm_clwb(addr) \
+    asm volatile(".byte 0x66; xsaveopt %0" : "+m"(*(volatile char *)(addr)))
+
+static inline void mem_flush(void *addr, size_t len) {
+    size_t i;
+    for (i = 0; i < len; i += 64) {
+        _mm_clwb((char *)addr + i);
+    }
+}
+
 int io_measure_timing = 1;
 // ==================== utils ====================
 static inline int arch_cache_line_size(void) {
@@ -614,6 +624,10 @@ int io_write(struct thread_data *td, off_t offset, char *buf, size_t len,
             memcpy(io_u->buf + bias, buf, per_size);
         else
             memset(io_u->buf + bias, 0, per_size);
+        
+        // make sure the data is flushed to media
+        // buffer instead of CPU cache
+        mem_flush(io_u->buf + bias, per_size);
 
         // Queue it any way
         // But might not release even the
@@ -1111,8 +1125,8 @@ DEFINE_UNIT_TEST(__wofs_bench, {
 })
 
 DEFINE_UNIT_TEST(__urfs_bench, {
-    
-})
+
+                               })
 
 int io_test(void) {
     struct thread_data td;

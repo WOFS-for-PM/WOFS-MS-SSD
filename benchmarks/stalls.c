@@ -18,9 +18,9 @@ int main() {
                 io_read(td, m_addr, meta, 64, O_IO_DROP);
                 meta[0] = (char)n;
                 io_write(td, m_addr, meta, 64, O_IO_CACHED);
-                try_evict(td, m_addr, 256);
+                try_evict(td, m_addr, IO_UNIT);
                 mem_fence();
-                m_addr += 256;
+                m_addr += IO_UNIT;
             }
             d_addr += 4096;
         }
@@ -57,9 +57,9 @@ int main() {
             mem_fence();
             for (int n = 0; n < j; n++) {
                 io_write(td, m_addr, meta, 64, O_IO_CACHED);
-                try_evict(td, m_addr, 256);
+                try_evict(td, m_addr, 64);
                 mem_fence();
-                m_addr += 256;
+                m_addr += 64;
             }
             d_addr += 4096;
         }
@@ -80,8 +80,8 @@ int main() {
                 io_write(td, m_addr, meta, 64, O_IO_CACHED);
                 mem_fence();
                 io_read(td, m_addr, meta, 64, O_IO_DROP);
-                try_evict(td, m_addr, 256);
-                m_addr += 256;
+                try_evict(td, m_addr, IO_UNIT);
+                m_addr += IO_UNIT;
             }
             d_addr += 4096;
         }
