@@ -730,6 +730,6 @@ static __attribute__((destructor)) void killer_destroy(void) {
 #endif
 
     hk_put_super(&sb);
-
+    exit_hk_fs();
     pr_info("KILLER unloaded.\n");
 }

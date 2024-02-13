@@ -29,6 +29,25 @@ static inline void mem_flush(void *addr, size_t len) {
     }
 }
 
+void memcpy_nt(char *dst, char *src, unsigned size) {
+    char *dst_end = dst + size;
+    while (dst != dst_end) {
+        __m128i res = _mm_stream_load_si128((__m128i *)src);
+        *((__m128i *)dst) = res;
+        src += 16;
+        dst += 16;
+    }
+}
+
+void memset_nt(char *dst, int c, unsigned size) {
+    char *dst_end = dst + size;
+    __m128i c16 = _mm_set1_epi8(c);
+    while (dst != dst_end) {
+        _mm_stream_si128((__m128i *)dst, c16);
+        dst += 16;
+    }
+}
+
 int io_measure_timing = 1;
 // ==================== utils ====================
 static inline int arch_cache_line_size(void) {
@@ -620,14 +639,12 @@ int io_write(struct thread_data *td, off_t offset, char *buf, size_t len,
         }
         io_u->opcode = IO_WRITE;
 
-        if (buf)
-            memcpy(io_u->buf + bias, buf, per_size);
-        else
-            memset(io_u->buf + bias, 0, per_size);
-        
         // make sure the data is flushed to media
         // buffer instead of CPU cache
-        mem_flush(io_u->buf + bias, per_size);
+        if (buf)
+            memcpy_nt(io_u->buf + bias, buf, per_size);
+        else
+            memset_nt(io_u->buf + bias, 0, per_size);
 
         // Queue it any way
         // But might not release even the
