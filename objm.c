@@ -1686,13 +1686,16 @@ int create_data_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
         offset + size > sih->i_size ? offset + size : sih->i_size;
     u64 blk = 0;
     int ret = 0;
+    u32 num_blks = MTA_PKG_DATA_BLK;
     INIT_TIMING(time);
 
     HK_START_TIMING(new_data_trans_t, time);
     blk = get_ps_blk(sbi, data_addr);
+    
+    num_blks = MTA_PKG_DATA_BLK * sbi->pkg_locality;
 
     ret = reserve_pkg_space(obj_mgr, &out_param->addr, TL_MTA_PKG_DATA,
-                            MTA_PKG_DATA_BLK);
+                            num_blks);
     if (ret) {
         goto out;
     }

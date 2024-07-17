@@ -71,6 +71,7 @@ void urfs_destroy_allocator() {
 void urfs_init_itarget() {
     itarget.header.ino = 0;
     itarget.header.size = 0;
+    itarget.header.gran = 2 * 1024 * 1024;
     memset(itarget.fullpath, 0, FULLPATH);
     memset(itarget.meta, 0, METASIZE);
     for (int i = 0; i < MAX_NEXTENTS; i++) {
@@ -267,13 +268,15 @@ void __io_copy(uint64_t src, uint64_t dst, uint64_t len) {
     char *buf = (char *)kmalloc(len, GFP_KERNEL);
     io_read(td, src, buf, len, O_IO_DROP);
     io_write(td, dst, buf, len, O_IO_DROP);
+    io_fence(td);
     kfree(buf);
 }
 
 int urfs_merge_extents(struct urfs_extent *old_extent1,  // logical low address
                        struct urfs_extent *old_extent2,  // logical high address
                        struct urfs_extent *new_extent) {
-    long blk, i;
+    long blk, i, nblks = 0;
+    uint64_t iorig_gran = itarget.header.gran / 2;
     int ret = 0;
 
     blk = urfs_alloc_zone(ALLOC_LARGE_ZONE, itarget.header.gran);
@@ -281,42 +284,60 @@ int urfs_merge_extents(struct urfs_extent *old_extent1,  // logical low address
         return -ENOSPC;
     }
 
-    for (i = 0; i < old_extent1->nblk; i++) {
-        __io_copy((old_extent1->pba + i) * BLKSIZE, (blk + i) * BLKSIZE,
-                  BLKSIZE);
+    if (old_extent1->pba != INVALID_PBA) {
+        for (i = 0; i < old_extent1->nblk; i++) {
+            __io_copy((old_extent1->pba + i) * BLKSIZE, (blk + i) * BLKSIZE,
+                      BLKSIZE);
+        }
+        urfs_free_zone(ALLOC_LARGE_ZONE, old_extent1->pba,
+                       old_extent1->pba + iorig_gran / BLKSIZE);
+        nblks += old_extent1->nblk;
+        old_extent1->pba = INVALID_PBA;
+        old_extent1->nblk = 0;
     }
 
-    for (i = 0; i < old_extent2->nblk; i++) {
-        __io_copy((old_extent2->pba + i) * BLKSIZE,
-                  (blk + old_extent1->nblk + i) * BLKSIZE, BLKSIZE);
+    if (old_extent2->pba != INVALID_PBA) {
+        for (i = 0; i < old_extent2->nblk; i++) {
+            __io_copy((old_extent2->pba + i) * BLKSIZE,
+                      (blk + old_extent1->nblk + i) * BLKSIZE, BLKSIZE);
+        }
+        urfs_free_zone(ALLOC_LARGE_ZONE, old_extent2->pba,
+                       old_extent2->pba + iorig_gran / BLKSIZE);
+        nblks += old_extent2->nblk;
+        old_extent2->pba = INVALID_PBA;
+        old_extent2->nblk = 0;
     }
-
-    urfs_free_zone(ALLOC_LARGE_ZONE, old_extent1->pba,
-                   old_extent1->pba + old_extent1->nblk);
-
-    urfs_free_zone(ALLOC_LARGE_ZONE, old_extent2->pba,
-                   old_extent2->pba + old_extent2->nblk);
 
     new_extent->pba = blk;
-    new_extent->nblk = old_extent1->nblk + old_extent2->nblk;
+    new_extent->nblk = nblks;
 
     return ret;
 }
 
-long urfs_get_blocks(struct inode *inode, long *blks) {
+// FIXME: how to manage large allocated data blocks?
+long urfs_get_blocks(struct inode *inode, loff_t pos, long *blks) {
     uint64_t isize = itarget.header.size;
-    uint64_t icap = round_up(isize, itarget.header.gran);
     uint64_t igran = itarget.header.gran;
-    uint64_t blk_left = (icap - isize) / BLKSIZE;
-    uint64_t iindex = isize / igran, ibuddy_index = 0, i;
+    uint64_t iindex = pos / igran, ibuddy_index = 0, i;
+    struct urfs_extent *extent;
+    uint64_t blk_left = 0;
     long ret;
+
+    if (iindex < MAX_NEXTENTS) {
+        extent = &((struct urfs_extent *)itarget.meta)[iindex];
+        if (extent->pba != INVALID_PBA) {
+            blk_left = 1;
+        }
+    }
 
     if (blk_left > 0) {
         ret = ((struct urfs_extent *)itarget.meta)[iindex].pba +
-              (isize - round_down(isize, igran)) / BLKSIZE;
-        *blks = *blks > blk_left ? blk_left : *blks;
+              (pos % igran / BLKSIZE);
+        *blks = *blks > (igran - pos % igran) / BLKSIZE
+                    ? (igran - pos % igran) / BLKSIZE
+                    : *blks;
     } else {
-        if (isize == MAX_NEXTENTS * igran) {
+        if (isize >= MAX_NEXTENTS * igran) {
             struct urfs_extent *old_extent, *old_buddy_extent;
             struct urfs_extent *new_extent;
             // upgrade the allocation granularity
@@ -325,14 +346,25 @@ long urfs_get_blocks(struct inode *inode, long *blks) {
             for (i = 0; i < MAX_NEXTENTS / 2; i++) {
                 iindex = i * 2;
                 ibuddy_index = iindex + 1;
+
                 old_extent = &((struct urfs_extent *)itarget.meta)[iindex];
                 old_buddy_extent =
                     &((struct urfs_extent *)itarget.meta)[ibuddy_index];
+
                 new_extent = &((struct urfs_extent *)itarget.meta)[i];
+
+                if (old_extent->pba == INVALID_PBA &&
+                    old_buddy_extent->pba == INVALID_PBA) {
+                    new_extent->pba = INVALID_PBA;
+                    new_extent->nblk = 0;
+                    continue;
+                }
+
                 urfs_merge_extents(old_extent, old_buddy_extent, new_extent);
             }
         }
-        ret = urfs_alloc_zone(ALLOC_LARGE_ZONE, itarget.header.gran);
+        ret = urfs_alloc_zone(ALLOC_LARGE_ZONE, itarget.header.gran) +
+              (pos % itarget.header.gran / BLKSIZE);
         *blks = *blks > itarget.header.gran / BLKSIZE
                     ? itarget.header.gran / BLKSIZE
                     : *blks;
@@ -352,9 +384,11 @@ ssize_t urfs_file_write(struct file *filp, const char __user *buf, size_t len,
 
     blks = roundup(len, BLKSIZE) / BLKSIZE;
 
-    itarget.header.size = *ppos;
+    itarget.header.size =
+        *ppos > itarget.header.size ? *ppos : itarget.header.size;
+
     while (len > 0) {
-        blk = urfs_get_blocks(filp->f_inode, &blks);
+        blk = urfs_get_blocks(filp->f_inode, *ppos, &blks);
         if (blk < 0) {
             return blk;
         }
@@ -363,16 +397,19 @@ ssize_t urfs_file_write(struct file *filp, const char __user *buf, size_t len,
         io_write(td, blk * BLKSIZE, buf, written, O_IO_DROP);
 
         // update inode metadata
-        iindex = itarget.header.size / itarget.header.gran;
+        iindex = *ppos / itarget.header.gran;
         extent = &((struct urfs_extent *)itarget.meta)[iindex];
         if (extent->pba == INVALID_PBA) {
-            extent->pba = blk;
+            // roll aligned
+            extent->pba = blk - (*ppos % itarget.header.gran / BLKSIZE);
             extent->nblk = written / BLKSIZE;
         } else {
             extent->nblk += written / BLKSIZE;
         }
 
-        itarget.header.size += written;
+        itarget.header.size = *ppos + written > itarget.header.size
+                                  ? *ppos + written
+                                  : itarget.header.size;
         len -= written;
         *ppos += written;
 
@@ -380,6 +417,14 @@ ssize_t urfs_file_write(struct file *filp, const char __user *buf, size_t len,
             td,
             INODE_TABLE_START + itarget.header.ino * sizeof(struct urfs_inode),
             (char *)&itarget, sizeof(struct urfs_inode), O_IO_CACHED);
+
+#ifdef MODE_STRICT
+        io_clwb(
+            td,
+            INODE_TABLE_START + itarget.header.ino * sizeof(struct urfs_inode),
+            sizeof(struct urfs_inode));
+        io_fence(td);
+#endif
     }
 
     return len;
@@ -397,32 +442,71 @@ ssize_t urfs_file_write(struct file *filp, const char __user *buf, size_t len,
     }
 
 int main() {
+    unsigned long io_blk[] = {4 * 1024,  8 * 1024,  12 * 1024, 16 * 1024,
+                              20 * 1024, 24 * 1024, 28 * 1024, 32 * 1024,
+                              36 * 1024, 40 * 1024, 44 * 1024};
+    unsigned long sizes[] = {512 * 1024 * 1024,
+                             1024 * 1024 * 1024};
+    char bench_name[128];
+    char *per_buf;
+
     td = init_io_engine(-1);
     DECLARE_BENCH_ENV();
 
-    URFS_BENCH_START("urfs seq 256MiB write (no merge)");
-    loop = 64 * 1024;
-    loff_t pos = 0;
-    for (int i = 0; i < loop; i++) {
-        urfs_file_write(&filp, buf, 4096, &pos);
-    }
-    URFS_BENCH_END(loop, loop * 4096);
+#ifdef MODE_STRICT
+    printf("STRICT ON\n");
+#endif
 
-    URFS_BENCH_START("urfs seq 512MiB write (single merge)");
-    loop = 128 * 1024;
-    loff_t pos = 0;
-    for (int i = 0; i < loop; i++) {
-        urfs_file_write(&filp, buf, 4096, &pos);
-    }
-    URFS_BENCH_END(loop, loop * 4096);
+    // SW
+    // for (int size_idx = 0; size_idx < 3; size_idx++) {
+    //     for (int blk_idx = 0; blk_idx < 11; blk_idx++) {
+    //         sprintf(bench_name, "urfs_SW_%ld_MiB_per_%ld_KiB",
+    //                 sizes[size_idx] / 1024 / 1024, io_blk[blk_idx] / 1024);
+    //         loff_t pos = 0;
+    //         loop = sizes[size_idx] / io_blk[blk_idx];
+    //         per_buf = (char *)kmalloc(io_blk[blk_idx], GFP_KERNEL);
+    //         URFS_BENCH_START(bench_name);
+    //         for (int i = 0; i < loop; i++) {
+    //             urfs_file_write(&filp, per_buf, io_blk[blk_idx], &pos);
+    //         }
+    //         URFS_BENCH_END(loop, sizes[size_idx]);
+    //         kfree(per_buf);
+    //     }
+    // }
 
-    URFS_BENCH_START("urfs seq 1GiB write (double merge)");
-    loop = 256 * 1024;
-    loff_t pos = 0;
-    for (int i = 0; i < loop; i++) {
-        urfs_file_write(&filp, buf, 4096, &pos);
+    // RW
+    for (int size_idx = 0; size_idx < 3; size_idx++) {
+        for (int blk_idx = 0; blk_idx < 11; blk_idx++) {
+            sprintf(bench_name, "urfs_RW_%ld_MiB_per_%ld_KiB",
+                    sizes[size_idx] / 1024 / 1024, io_blk[blk_idx] / 1024);
+            loop = sizes[size_idx] / io_blk[blk_idx];
+            printf("loop: %d\n", loop);
+            loff_t *poses =
+                (loff_t *)kmalloc(loop * sizeof(loff_t), GFP_KERNEL);
+            for (int i = 0; i < loop; i++) {
+                poses[i] = i * io_blk[blk_idx];
+            }
+
+            // shuffle poses
+            srand(time(NULL));
+            for (int i = loop - 1; i > 0; i--) {
+                int j = rand() % (i + 1);
+                loff_t tmp = poses[i];
+                poses[i] = poses[j];
+                poses[j] = tmp;
+            }
+
+            per_buf = (char *)kmalloc(io_blk[blk_idx], GFP_KERNEL);
+            URFS_BENCH_START(bench_name);
+            for (int i = 0; i < loop; i++) {
+                assert(poses[i] % io_blk[blk_idx] == 0);
+                urfs_file_write(&filp, per_buf, io_blk[blk_idx], &poses[i]);
+            }
+            URFS_BENCH_END(loop, sizes[size_idx]);
+            kfree(per_buf);
+            kfree(poses);
+        }
     }
-    URFS_BENCH_END(loop, loop * 4096);
 
     destroy_io_engine(td);
 }

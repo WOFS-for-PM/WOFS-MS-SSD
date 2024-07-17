@@ -101,7 +101,9 @@ enum {
     Opt_err_panic,
     Opt_err_ro,
     Opt_dbgmask,
-    Opt_err
+    Opt_err,
+    Opt_pkg_locality,
+    Opt_data_locality,
 };
 
 static const match_table_t tokens = {
@@ -118,6 +120,8 @@ static const match_table_t tokens = {
     {Opt_err_panic, "errors=panic"},
     {Opt_err_ro, "errors=remount-ro"},
     {Opt_dbgmask, "dbgmask=%u"},
+    {Opt_pkg_locality, "pkglocality=%u"},
+    {Opt_data_locality, "datalocality=%u"},
     {Opt_err, NULL},
 };
 
@@ -129,6 +133,9 @@ static int hk_parse_options(char *options, struct hk_sb_info *sbi,
 
     if (!options)
         return 0;
+    
+    sbi->pkg_locality = 1;
+    sbi->data_locality = 1;
 
     while ((p = strsep(&options, ",")) != NULL) {
         int token;
@@ -166,6 +173,16 @@ static int hk_parse_options(char *options, struct hk_sb_info *sbi,
                 break;
             case Opt_history_w:
                 set_opt(sbi->s_mount_opt, HISTORY_W);
+                break;
+            case Opt_pkg_locality:
+                if (match_int(&args[0], &option))
+                    goto bad_val;
+                sbi->pkg_locality = option;
+                break;
+            case Opt_data_locality:
+                if (match_int(&args[0], &option))
+                    goto bad_val;
+                sbi->data_locality = option;
                 break;
             case Opt_wprotect:
                 if (remount)

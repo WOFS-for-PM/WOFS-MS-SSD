@@ -1,0 +1,3 @@
+- [ ] ensure using NVMe SSD as the same I/O semantics as PM
+    - [ ] add automatic flush?
+    - [ ] add automatic cache: the whole io unit is touched and being dirty.

@@ -42,7 +42,7 @@ TARGETS=("$WAR" "$WAW_INPLACE" "$WAD" "$RAW")
 TARGETS_NAME=("WAR" "WAW_INPLACE" "WAD" "RAW")
 
 for ((i = 1; i <= loop; i++)); do
-    ./build/stalls >"$TMP_PATH"
+    ../build/stalls >"$TMP_PATH"
     TARGET_INDEX=0
     for target in "${TARGETS[@]}"; do
         for ((meta_times = 0; meta_times <= 9; meta_times++)); do

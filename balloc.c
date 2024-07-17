@@ -9,6 +9,10 @@ u64 hk_prepare_layout(struct super_block *sb, int cpuid, u64 blks,
     tlalloc_param_t param;
     tl_allocator_t *allocator = &layout->allocator;
     int ret = 0;
+    
+    if (sbi->data_locality == 0) {
+        blks = 1;
+    }
 
     tl_build_alloc_param(&param, blks, TL_BLK);
     ret = tlalloc(allocator, &param);

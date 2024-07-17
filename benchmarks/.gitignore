@@ -6,4 +6,5 @@
 !*.sh
 !*.py
 !performance-comparison-table*
+!FIG-*
 ./scripts/auto_passwd.sh

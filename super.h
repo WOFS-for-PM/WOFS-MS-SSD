@@ -102,6 +102,10 @@ struct hk_sb_info {
         int hist_end;
         size_t histories[HK_HISTORY_WINDOWS];
     } dw;
+
+    /* for experiment usage */
+    u32 pkg_locality;
+    u32 data_locality;
 };
 
 static inline struct hk_sb_info *HK_SB(struct super_block *sb) {

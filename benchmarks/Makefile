@@ -16,6 +16,12 @@ ifeq ($(DEBUG), 1)
 	OPTS := -O0
 endif
 
+ifeq ($(MODE), 1)
+	CFLAGS += -DMODE_STRICT
+else ifeq ($(MODE), 0)
+	CFLAGS += -DMODE_ASYNC
+endif
+
 all: stalls urfs
 
 stalls: libbackend.a libkp.so
