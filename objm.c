@@ -1307,7 +1307,7 @@ void commit_pkg(struct hk_sb_info *sbi, void *dev_addr, void *target_addr,
     io_dispatch_msync(sbi, (u64)dev_addr, len, (u64)target_addr);
     io_dispatch_lock_range(sb, last_obj_hdr, sizeof(struct hk_obj_hdr), &flags);
 
-    try_evict_meta_block(sbi, (u64)dev_addr);
+    // try_evict_meta_block(sbi, (u64)dev_addr);
 
     HK_END_TIMING(wr_once_t, time);
 }
@@ -1691,8 +1691,22 @@ int create_data_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
 
     HK_START_TIMING(new_data_trans_t, time);
     blk = get_ps_blk(sbi, data_addr);
-    
-    num_blks = MTA_PKG_DATA_BLK * sbi->pkg_locality;
+
+    if (sbi->locality_test) {
+        if (sbi->aging_pos > AGING_PHASE_2) {
+            if (sbi->aging_pos - 512 * 4096 < AGING_PHASE_2) {
+                hk_info("aging phase 2, no meta locality\n");
+            }
+            num_blks = 4096 >> KILLER_MTA_SHIFT;
+        }
+
+        if (sbi->aging_pos > RECOVER_PHASE_1) {
+            if (sbi->aging_pos - 512 * 4096 < RECOVER_PHASE_1) {
+                hk_info("defrag phase\n");
+            }
+            num_blks = 128 >> KILLER_MTA_SHIFT;
+        }
+    }
 
     ret = reserve_pkg_space(obj_mgr, &out_param->addr, TL_MTA_PKG_DATA,
                             num_blks);
@@ -1717,6 +1731,9 @@ int create_data_pkg(struct hk_sb_info *sbi, struct hk_inode_info_header *sih,
         __fill_ps_obj_hdr(sbi, &cur_addr->hdr, OBJ_DATA);
     }
     commit_pkg(sbi, (void *)(data), start_addr, OBJ_DATA_SIZE, &cur_addr->hdr);
+    
+    try_evict_meta_block(sbi, (u64)data, num_blks << KILLER_MTA_SHIFT);
+
     io_dispatch_munmap(sbi, start_addr);
 
     /* NOTE: prevent read after persist  */

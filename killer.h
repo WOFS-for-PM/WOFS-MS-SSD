@@ -397,8 +397,8 @@ static u64 inline __is_last_ps_entry(struct hk_sb_info *sbi, u64 addr,
 }
 
 static void inline try_evict_meta_block(struct hk_sb_info *sbi,
-                                        u64 last_entry_addr) {
-    if (__is_last_ps_entry(sbi, last_entry_addr, MTA_PKG_DATA_SIZE)) {
+                                        u64 last_entry_addr, u64 last_entry_size) {
+    if (__is_last_ps_entry(sbi, last_entry_addr, last_entry_size)) {
         int handle = get_handle_by_addr(sbi, last_entry_addr);
         hk_dbg("flush metadata block @ [0x%llx, 0x%llx)\n",
                round_down(last_entry_addr, KILLER_BLK_SIZE),

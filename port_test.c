@@ -233,7 +233,7 @@ DEFINE_UNIT_TEST_START(obj_test) {
 
         // flush the metadata block
         // NOTE: this is redundant
-        try_evict_meta_block(sbi, out_param.addr);
+        try_evict_meta_block(sbi, out_param.addr, MTA_PKG_DATA_SIZE);
     }
 
     // Start GC

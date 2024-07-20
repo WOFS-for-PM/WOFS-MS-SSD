@@ -9,10 +9,6 @@ u64 hk_prepare_layout(struct super_block *sb, int cpuid, u64 blks,
     tlalloc_param_t param;
     tl_allocator_t *allocator = &layout->allocator;
     int ret = 0;
-    
-    if (sbi->data_locality == 0) {
-        blks = 1;
-    }
 
     tl_build_alloc_param(&param, blks, TL_BLK);
     ret = tlalloc(allocator, &param);
@@ -254,7 +250,7 @@ static int hk_migration(void *_alloc, struct list_head *victim_list,
                 handle = get_handle_by_addr(sbi, ps_addr);
                 io_dispatch_write_cached_handle(sbi, ps_addr, p, entry_size,
                                                 handle);
-                try_evict_meta_block(sbi, ps_addr);
+                try_evict_meta_block(sbi, ps_addr, meta_type_to_size(m_alloc_type));
 
                 // update reference for all entry
                 entry_addr = get_ps_entry_addr(sbi, node->blk, i);

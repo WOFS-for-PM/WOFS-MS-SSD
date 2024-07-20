@@ -103,9 +103,13 @@ struct hk_sb_info {
         size_t histories[HK_HISTORY_WINDOWS];
     } dw;
 
-    /* for experiment usage */
-    u32 pkg_locality;
-    u32 data_locality;
+#ifdef AGING_WORKLOAD_SIZE
+    size_t aging_pos;
+    size_t recover_blks;
+    size_t counter;
+#endif
+
+    u32 locality_test;
 };
 
 static inline struct hk_sb_info *HK_SB(struct super_block *sb) {

@@ -167,8 +167,8 @@ static size_t hk_try_in_place_append_write(struct hk_inode_info *si, loff_t pos,
         obj_ref_data_t *ref_data = (obj_ref_data_t *)ref;
         void *target = (void *)get_ps_addr_by_data_ref(sbi, ref_data, pos);
 
-        assert(sbi->dax == true);
-
+        // !FIXME
+        // assert(sbi->dax == true);
         HK_START_TIMING(memcpy_w_media_t, io_time);
         io_dispatch_write_thru(sbi, (u64)target, content, out_size);
         HK_END_TIMING(memcpy_w_media_t, io_time);
@@ -177,10 +177,11 @@ static size_t hk_try_in_place_append_write(struct hk_inode_info *si, loff_t pos,
          * achieving WO. */
         /*       atomicity can be guaranteed since either the append is OK
          * or not. */
-        if (overflow == false) {
-            update_data_pkg(sbi, sih, get_ps_addr(sbi, ref_data->hdr.addr), 1,
-                            UPDATE_SIZE_FOR_APPEND, pos + out_size);
-        }
+        // !FIXME
+        // if (overflow == false) {
+        //     update_data_pkg(sbi, sih, get_ps_addr(sbi, ref_data->hdr.addr), 1,
+        //                     UPDATE_SIZE_FOR_APPEND, pos + out_size);
+        // }
     }
 
     return out_size;
@@ -344,6 +345,7 @@ ssize_t do_hk_file_write(struct file *filp, const char __user *buf, size_t len,
     bool append_like = false, extend = false;
     unsigned char *pbuf = (unsigned char *)buf;
     struct hk_layout_prep prep;
+    struct hk_sb_info *sbi = HK_SB(sb);
     size_t out_size = 0;
     ssize_t written = 0;
     size_t error = 0;
@@ -373,9 +375,31 @@ ssize_t do_hk_file_write(struct file *filp, const char __user *buf, size_t len,
         append_like = true;
     }
 
-    // force non-append-like write for non-dax
-    if (!HK_SB(sb)->dax) {
-        append_like = false;
+    if (sbi->locality_test) {
+        if (pos > AGING_PHASE_1) {
+            if (pos - 4096 < AGING_PHASE_1) {
+                hk_info("start aging, no huge allocation\n");
+            }
+            append_like = false;
+            sbi->aging_pos = pos;
+        }
+
+        if (pos > RECOVER_PHASE_2) {
+            if (pos - 4096 < RECOVER_PHASE_2) {
+                hk_info("start recover, enable huge allocation\n");
+            }
+            append_like = true;
+            sbi->aging_pos = pos;
+            sbi->counter++;
+            // 4 stages
+            sbi->recover_blks = (sbi->counter >> 6)  > HK_EXTEND_NUM_BLOCKS ? HK_EXTEND_NUM_BLOCKS : (sbi->counter >> 6);
+            if (sbi->recover_blks == 0) {
+                sbi->recover_blks = 1;
+            }
+        } else {
+            sbi->counter = 0;
+            sbi->recover_blks = 0;
+        }
     }
 
     error = file_remove_privs(filp);
@@ -399,10 +423,17 @@ ssize_t do_hk_file_write(struct file *filp, const char __user *buf, size_t len,
     blks = blks_orig = (end_index - index + 1); /* Total blks to be written */
     blks_allocated = 0;
     if (append_like) {
-        /* try extend blks to be allocted */
-        if (blks < HK_EXTEND_NUM_BLOCKS) {
-            blks = HK_EXTEND_NUM_BLOCKS;
-            extend = true;
+        if (sbi->locality_test && pos > RECOVER_PHASE_2) {
+            if (blks < sbi->recover_blks) {
+                blks = sbi->recover_blks;
+                extend = true;
+            }
+        } else {
+            /* try extend blks to be allocted */
+            if (blks < HK_EXTEND_NUM_BLOCKS) {
+                blks = HK_EXTEND_NUM_BLOCKS;
+                extend = true;
+            }
         }
     }
 
